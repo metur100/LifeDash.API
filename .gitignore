@@ -3,3 +3,10 @@ obj/
 App_Data/
 logs/
 *.user
+
+# Visual Studio workspace/cache
+.vs/
+
+# Local/production secrets (use environment variables in production)
+LifeDash.Api/appsettings.json
+LifeDash.Api/Properties/PublishProfiles/*.pubxml.user
