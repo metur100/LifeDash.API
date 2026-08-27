@@ -237,7 +237,10 @@ public static class ModuleEndpoints
                 return Results.BadRequest(new { error = $"Die Datei ist größer als {maxMb} MB." });
 
             var root = cfg["Storage:UploadPath"] ?? "App_Data/uploads";
-            var dir = Path.Combine(root, u.UserId().ToString());
+            var absoluteRoot = Path.IsPathRooted(root)
+                ? root
+                : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, root));
+            var dir = Path.Combine(absoluteRoot, u.UserId().ToString());
             Directory.CreateDirectory(dir);
 
             var ext = Path.GetExtension(file.FileName);
@@ -258,8 +261,63 @@ public static class ModuleEndpoints
         {
             var doc = await db.Documents.AsNoTracking()
                 .FirstOrDefaultAsync(d => d.Id == id && d.UserId == u.UserId(), ct);
-            if (doc?.StoragePath is null || !File.Exists(doc.StoragePath)) return Results.NotFound();
-            return Results.File(doc.StoragePath, doc.ContentType ?? "application/octet-stream", doc.OriginalName);
+
+            if (doc is null) return Results.NotFound();
+            var resolvedPath = ResolveStoragePath(doc.StoragePath);
+            if (resolvedPath is null) return Results.NotFound();
+
+            var contentType = string.IsNullOrWhiteSpace(doc.ContentType)
+                ? "application/octet-stream"
+                : doc.ContentType;
+            var safeName = SafeDownloadName(doc.OriginalName);
+
+            try
+            {
+                return string.IsNullOrWhiteSpace(safeName)
+                    ? Results.File(resolvedPath, contentType)
+                    : Results.File(resolvedPath, contentType, safeName);
+            }
+            catch (IOException)
+            {
+                return Results.NotFound();
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return Results.NotFound();
+            }
         });
+    }
+
+    private static string? ResolveStoragePath(string? rawPath)
+    {
+        if (string.IsNullOrWhiteSpace(rawPath)) return null;
+
+        try
+        {
+            if (Path.IsPathRooted(rawPath))
+            {
+                var full = Path.GetFullPath(rawPath);
+                return File.Exists(full) ? full : null;
+            }
+
+            var localFull = Path.GetFullPath(rawPath);
+            if (File.Exists(localFull)) return localFull;
+
+            var appBaseFull = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, rawPath));
+            return File.Exists(appBaseFull) ? appBaseFull : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? SafeDownloadName(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return null;
+
+        var cleaned = fileName.Replace("\r", "").Replace("\n", "").Trim();
+        cleaned = Path.GetFileName(cleaned);
+        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
     }
 }
