@@ -313,6 +313,7 @@ public class DeadlineEngine(LifeDashContext db)
         return rows.Sum(i => i.Cadence switch
         {
             "yearly" => i.Amount / 12m,
+            "quarterly" => i.Amount / 3m,
             "onetime" => 0m,
             _ => i.Amount
         });
