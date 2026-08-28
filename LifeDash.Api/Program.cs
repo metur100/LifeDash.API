@@ -27,6 +27,8 @@ builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<DeadlineEngine>();
 builder.Services.AddSingleton<IAuditLogWriter, AuditLogWriter>();
 builder.Services.AddHttpContextAccessor();
+builder.Services.Configure<ReminderEmailOptions>(builder.Configuration.GetSection("ReminderEmail"));
+builder.Services.AddHostedService<ReminderEmailWorker>();
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(o =>
