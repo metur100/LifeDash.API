@@ -106,7 +106,15 @@ public class DeadlineEngine(LifeDashContext db)
                 p.DueOn, days, "Als bezahlt markieren", "/finance", "Payment", p.Id));
         }
 
-        // ---------- 5. subscriptions: cancellation window beats renewal ----------
+        // ---------- 5. subscriptions: cancellation deadline only ----------
+        // Subscription.RenewsOn is not a rolling "next renewal" date - it's set
+        // to StartOn on every save (see Contracts.tsx) and never advances, so
+        // comparing it directly to `today` used to produce a permanently
+        // "überfällig" alert for any contract older than a few weeks. Rather
+        // than reconstruct a synthetic renewal date, only the real, fixed
+        // Kündigungsfrist deadline is surfaced here - that's the one date a
+        // contract actually needs to act on, and it's what the reminder
+        // emails already cover.
         var subs = await db.Subscriptions.AsNoTracking()
             .Where(s => s.UserId == userId && s.IsActive)
             .ToListAsync(ct);
@@ -124,16 +132,6 @@ public class DeadlineEngine(LifeDashContext db)
                     s.Name,
                     $"Kündigungsfrist endet {Countdown(days)}{tail}",
                     cancel, days, "Vertrag prüfen", "/contracts", "Subscription", s.Id));
-            }
-            else if (s.FlowType != "none" && s.RenewsOn <= horizon)
-            {
-                var days = s.RenewsOn.DayNumber - today.DayNumber;
-                var verb = s.FlowType == "income" ? "Nächste Zahlung" : "Verlängert sich";
-                alerts.Add(new Alert(
-                    $"sub-{s.Id}", "finance", "renewal", days <= 7 ? AlertSeverity.Soon : AlertSeverity.Info,
-                    s.Name,
-                    $"{verb} {Countdown(days)} für {s.Amount ?? 0m:0.00} {s.Currency}.",
-                    s.RenewsOn, days, "Vertrag prüfen", "/contracts", "Subscription", s.Id));
             }
         }
 
@@ -238,18 +236,6 @@ public class DeadlineEngine(LifeDashContext db)
         CancellationToken ct)
     {
         var list = new List<Insight>();
-
-        // contracts renewing next calendar month (cost or income, not "none")
-        var firstNext = new DateOnly(today.Year, today.Month, 1).AddMonths(1);
-        var endNext = firstNext.AddMonths(1).AddDays(-1);
-        var renewing = subs.Where(s => s.FlowType != "none" && s.RenewsOn >= firstNext && s.RenewsOn <= endNext).ToList();
-        if (renewing.Count > 0)
-        {
-            var total = renewing.Sum(s => s.Amount ?? 0m);
-            list.Add(new Insight("subs-next-month", "💡",
-                $"{renewing.Count} Verträge verlängern sich nächsten Monat für zusammen {total:0.00} €.",
-                "/contracts"));
-        }
 
         // missing mandatory documents
         var missing = cases.SelectMany(c => c.RequiredDocuments)
