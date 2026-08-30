@@ -87,7 +87,7 @@ public class ReminderEmailWorker : BackgroundService
             var attendees = a.Attendees.Select(x => memberNames.GetValueOrDefault(x.FamilyMemberId, "-")).ToList();
             var subject = $"Erinnerung morgen: {a.Title}";
             var body = EmailTemplate.Render(
-                "#2f6fed", "Termin morgen", a.Title,
+                "#4f6df5", "📅", "Termin", a.Title, "Morgen fällig",
                 "Dieser Termin steht morgen an.",
                 new[]
                 {
@@ -96,6 +96,7 @@ public class ReminderEmailWorker : BackgroundService
                     ("Kategorie", a.Category),
                     ("Teilnehmer", attendees.Count > 0 ? string.Join(", ", attendees) : ""),
                 },
+                AppUrl("/family"), "Termin ansehen",
                 "LifeDash erinnert dich automatisch einen Tag vor jedem Termin.");
 
             if (await TrySendEmailAsync(subject, body, ct))
@@ -120,7 +121,7 @@ public class ReminderEmailWorker : BackgroundService
 
             var subject = $"Check-in Erinnerung morgen: {b.Title}";
             var body = EmailTemplate.Render(
-                "#0f9d78", "Reise · Check-in in 24 Std.", b.Title,
+                "#0ea5a3", "✈️", "Reise · Check-in", b.Title, "In 24 Std.",
                 "Der Check-in für diesen Flug öffnet in den nächsten 24 Stunden.",
                 new[]
                 {
@@ -129,6 +130,7 @@ public class ReminderEmailWorker : BackgroundService
                     ("Referenznummer", b.ReferenceNo ?? ""),
                     ("Betrag", b.Amount is { } amt ? $"{amt:0.00} {b.Currency}" : ""),
                 },
+                AppUrl($"/travel/{b.TripId}"), "Reise ansehen",
                 "LifeDash erinnert dich automatisch 24 Stunden vor jedem Flug.");
 
             if (await TrySendEmailAsync(subject, body, ct))
@@ -151,13 +153,14 @@ public class ReminderEmailWorker : BackgroundService
             var person = i.FamilyMemberId is { } mid ? memberNames.GetValueOrDefault(mid, "") : "";
             var subject = $"Heute: {i.Title}";
             var body = EmailTemplate.Render(
-                "#c2417a", "Heute", i.Title,
+                "#ec4899", "🎂", "Wichtiger Tag", i.Title, "Heute",
                 "Dieser Tag ist heute.",
                 new[]
                 {
                     ("Datum", occurrence.Value.ToString("dd.MM.yyyy")),
                     ("Person", person),
                 },
+                AppUrl("/family"), "Im Familienbereich ansehen",
                 "LifeDash erinnert dich automatisch am Tag selbst an wiederkehrende wichtige Daten.");
 
             if (await TrySendEmailAsync(subject, body, ct))
@@ -179,7 +182,7 @@ public class ReminderEmailWorker : BackgroundService
 
             var subject = $"Zahlung morgen fällig: {p.Title}";
             var body = EmailTemplate.Render(
-                "#d9534f", "Finanzen · Zahlung morgen", p.Title,
+                "#ef4444", "💳", "Finanzen · Zahlung", p.Title, "Morgen fällig",
                 "Diese Zahlung ist morgen fällig.",
                 new[]
                 {
@@ -187,6 +190,7 @@ public class ReminderEmailWorker : BackgroundService
                     ("Fällig am", p.DueOn.ToString("dd.MM.yyyy")),
                     ("Kategorie", p.Category ?? ""),
                 },
+                AppUrl("/finance"), "In Finanzen öffnen",
                 "LifeDash erinnert dich automatisch einen Tag vor jeder fälligen Zahlung.");
 
             if (await TrySendEmailAsync(subject, body, ct))
@@ -210,7 +214,7 @@ public class ReminderEmailWorker : BackgroundService
 
             var subject = $"Einnahme morgen erwartet: {i.Source}";
             var body = EmailTemplate.Render(
-                "#1f9d55", "Finanzen · Einnahme morgen", i.Source,
+                "#10b981", "💰", "Finanzen · Einnahme", i.Source, "Morgen erwartet",
                 "Diese Einnahme wird morgen erwartet.",
                 new[]
                 {
@@ -218,6 +222,7 @@ public class ReminderEmailWorker : BackgroundService
                     ("Erwartet am", next.Value.ToString("dd.MM.yyyy")),
                     ("Turnus", i.Cadence),
                 },
+                AppUrl("/finance"), "In Finanzen öffnen",
                 "LifeDash erinnert dich automatisch einen Tag vor jeder erwarteten Einnahme (monatlicher Turnus).");
 
             if (await TrySendEmailAsync(subject, body, ct))
@@ -240,7 +245,7 @@ public class ReminderEmailWorker : BackgroundService
             var person = s.FamilyMemberId is { } mid ? memberNames.GetValueOrDefault(mid, "") : "";
             var subject = $"Kündigungsfrist morgen: {s.Name}";
             var body = EmailTemplate.Render(
-                "#b8860b", "Vertrag · Kündigungsfrist morgen", s.Name,
+                "#d97706", "📄", "Vertrag · Kündigungsfrist", s.Name, "Frist endet morgen",
                 "Die Kündigungsfrist für diesen Vertrag endet morgen.",
                 new[]
                 {
@@ -249,12 +254,16 @@ public class ReminderEmailWorker : BackgroundService
                     ("Person", person),
                     ("Hinweis", s.NoticeText ?? ""),
                 },
+                AppUrl("/contracts"), "Vertrag ansehen",
                 "LifeDash erinnert dich automatisch einen Tag vor jeder Kündigungsfrist.");
 
             if (await TrySendEmailAsync(subject, body, ct))
                 s.Notes = AppendMarker(s.Notes, marker);
         }
     }
+
+    private string? AppUrl(string path) =>
+        string.IsNullOrWhiteSpace(_options.AppBaseUrl) ? null : _options.AppBaseUrl!.TrimEnd('/') + path;
 
     private bool IsConfigured()
     {
