@@ -29,7 +29,11 @@ public class DeadlineEngine(LifeDashContext db)
 
     public async Task<DashboardResponse> BuildAsync(int userId, int horizonDays, CancellationToken ct = default)
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        // Local time, not UTC: Germany is UTC+1/+2, so UtcNow would report
+        // "yesterday" for the first 1-2 hours after local midnight - the same
+        // class of bug already fixed on the frontend and avoided in
+        // ReminderEmailWorker (which uses DateTime.Now for the same reason).
+        var today = DateOnly.FromDateTime(DateTime.Now);
         var horizon = today.AddDays(horizonDays);
         var alerts = new List<Alert>();
 
@@ -223,15 +227,14 @@ public class DeadlineEngine(LifeDashContext db)
             .ThenBy(a => a.Title)
             .ToList();
 
-        var insights = await BuildInsightsAsync(userId, today, subs, cases, ct);
-        var summary = await BuildSummaryAsync(userId, today, alerts, cases, subs, nextTrip, ct);
+        var insights = await BuildInsightsAsync(userId, today, cases, ct);
+        var summary = await BuildSummaryAsync(userId, today, alerts, cases, nextTrip, ct);
 
         return new DashboardResponse(summary, alerts, insights);
     }
 
     private async Task<List<Insight>> BuildInsightsAsync(
         int userId, DateOnly today,
-        List<Models.Subscription> subs,
         List<Models.AuthorityCase> cases,
         CancellationToken ct)
     {
@@ -244,19 +247,18 @@ public class DeadlineEngine(LifeDashContext db)
             list.Add(new Insight("missing-docs", "⚠️",
                 $"{missing} Pflichtdokumente fehlen noch in deinen Behördenvorgängen.", "/authorities"));
 
-        // budget check
+        // budget check - Einnahmen/Fixkosten only, Verträge are deliberately
+        // excluded from all Finanzen-facing math (see Finance.tsx/DeadlineEngine).
         var income = await MonthlyIncomeAsync(userId, ct);
         var costs = await MonthlyFixedCostsAsync(userId, ct);
-        var subMonthly = subs.Where(s => s.FlowType == "cost").Sum(MonthlyEquivalent);
-        var contractIncome = subs.Where(s => s.FlowType == "income").Sum(MonthlyEquivalent);
-        var balance = income - costs - subMonthly + contractIncome;
+        var balance = income - costs;
         if (income > 0)
         {
             list.Add(balance < 0
                 ? new Insight("budget", "📉",
                     $"Deine Fixkosten übersteigen dein Einkommen um {Math.Abs(balance):0.00} € pro Monat.", "/finance")
                 : new Insight("budget", "💰",
-                    $"Nach Fixkosten und Abos bleiben dir {balance:0.00} € pro Monat.", "/finance"));
+                    $"Nach Fixkosten bleiben dir {balance:0.00} € pro Monat.", "/finance"));
         }
 
         // documents expiring within 90 days
@@ -272,13 +274,13 @@ public class DeadlineEngine(LifeDashContext db)
 
     private async Task<DashboardSummary> BuildSummaryAsync(
         int userId, DateOnly today, List<Alert> alerts,
-        List<Models.AuthorityCase> cases, List<Models.Subscription> subs,
+        List<Models.AuthorityCase> cases,
         Models.Trip? nextTrip, CancellationToken ct)
     {
+        // Einnahmen/Fixkosten only - Verträge are deliberately excluded from
+        // all Finanzen-facing math (see Finance.tsx/DeadlineEngine).
         var income = await MonthlyIncomeAsync(userId, ct);
         var costs = await MonthlyFixedCostsAsync(userId, ct);
-        var subMonthly = subs.Where(s => s.FlowType == "cost").Sum(MonthlyEquivalent);
-        var contractIncome = subs.Where(s => s.FlowType == "income").Sum(MonthlyEquivalent);
         var openTasks = await db.Tasks.CountAsync(t => t.UserId == userId && !t.IsDone, ct);
         var missing = cases.SelectMany(c => c.RequiredDocuments)
                            .Count(r => r.IsMandatory && r.DocumentId == null);
@@ -290,9 +292,7 @@ public class DeadlineEngine(LifeDashContext db)
             alerts.Count(a => a.Severity == AlertSeverity.Soon),
             Math.Round(income, 2),
             Math.Round(costs, 2),
-            Math.Round(subMonthly, 2),
-            Math.Round(contractIncome, 2),
-            Math.Round(income - costs - subMonthly + contractIncome, 2),
+            Math.Round(income - costs, 2),
             openTasks,
             missing,
             nextTrip?.Title,
@@ -323,17 +323,6 @@ public class DeadlineEngine(LifeDashContext db)
             "onetime" => 0m,
             _ => f.Amount
         });
-    }
-
-    private static decimal MonthlyEquivalent(Models.Subscription s)
-    {
-        var amount = s.Amount ?? 0m;
-        return s.Cadence switch
-        {
-            "yearly" => amount / 12m,
-            "quarterly" => amount / 3m,
-            _ => amount
-        };
     }
 
     private static DateOnly? NextOccurrence(DateOnly value, bool yearly, DateOnly today) =>

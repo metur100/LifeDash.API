@@ -27,8 +27,6 @@ public record DashboardSummary(
     int Soon,
     decimal MonthlyIncome,
     decimal MonthlyFixedCosts,
-    decimal MonthlySubscriptions,
-    decimal MonthlyContractIncome,
     decimal MonthlyBalance,
     int OpenTasks,
     int MissingDocuments,
