@@ -62,15 +62,19 @@ public static class CrudEndpoints
                     .Where(x => x.UserId == userId && x.FamilyMemberId == id)
                     .ExecuteUpdateAsync(s => s.SetProperty(p => p.FamilyMemberId, (int?)null), ct);
 
-                await db.Appointments
-                    .Where(x => x.UserId == userId && x.FamilyMemberId == id)
-                    .ExecuteUpdateAsync(s => s.SetProperty(p => p.FamilyMemberId, (int?)null), ct);
+                await db.AppointmentAttendees
+                    .Where(x => x.FamilyMemberId == id && x.Appointment!.UserId == userId)
+                    .ExecuteDeleteAsync(ct);
 
                 await db.ImportantDates
                     .Where(x => x.UserId == userId && x.FamilyMemberId == id)
                     .ExecuteUpdateAsync(s => s.SetProperty(p => p.FamilyMemberId, (int?)null), ct);
 
                 await db.AuthorityCases
+                    .Where(x => x.UserId == userId && x.FamilyMemberId == id)
+                    .ExecuteUpdateAsync(s => s.SetProperty(p => p.FamilyMemberId, (int?)null), ct);
+
+                await db.Subscriptions
                     .Where(x => x.UserId == userId && x.FamilyMemberId == id)
                     .ExecuteUpdateAsync(s => s.SetProperty(p => p.FamilyMemberId, (int?)null), ct);
             }

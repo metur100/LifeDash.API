@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using LifeDash.Api.Data;
+using LifeDash.Api.Dtos;
 using LifeDash.Api.Models;
 using LifeDash.Api.Services;
 using Microsoft.EntityFrameworkCore;
@@ -12,7 +13,6 @@ public static class ModuleEndpoints
     {
         // ---- plain CRUD modules ----
         app.MapOwned<FamilyMember>("/api/family-members");
-        app.MapOwned<Appointment>("/api/appointments");
         app.MapOwned<ImportantDate>("/api/important-dates");
         app.MapOwned<Income>("/api/incomes");
         app.MapOwned<FixedCost>("/api/fixed-costs");
@@ -27,6 +27,78 @@ public static class ModuleEndpoints
                 ClaimsPrincipal u, CancellationToken ct) =>
                 Results.Ok(await engine.BuildAsync(u.UserId(), horizonDays ?? 120, ct)))
             .RequireAuthorization().WithTags("dashboard");
+
+        // ---- appointments with multiple attendees ----
+        var appointments = app.MapGroup("/api/appointments").RequireAuthorization().WithTags("appointments");
+
+        appointments.MapGet("/", async (LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            var list = await db.Appointments.AsNoTracking()
+                .Include(a => a.Attendees)
+                .Where(a => a.UserId == u.UserId())
+                .ToListAsync(ct);
+            return Results.Ok(list.Select(ToDto));
+        });
+
+        appointments.MapGet("/{id:int}", async (int id, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            var a = await db.Appointments.AsNoTracking().Include(x => x.Attendees)
+                .FirstOrDefaultAsync(x => x.Id == id && x.UserId == u.UserId(), ct);
+            return a is null ? Results.NotFound() : Results.Ok(ToDto(a));
+        });
+
+        appointments.MapPost("/", async (AppointmentInput input, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            var a = new Appointment
+            {
+                UserId = u.UserId(),
+                Title = input.Title,
+                Category = input.Category,
+                StartsAt = input.StartsAt,
+                EndsAt = input.EndsAt,
+                Location = input.Location,
+                ReminderDays = input.ReminderDays,
+                Notes = input.Notes,
+                IsDone = input.IsDone,
+                Attendees = (input.AttendeeIds ?? new()).Distinct()
+                    .Select(mid => new AppointmentAttendee { FamilyMemberId = mid }).ToList(),
+            };
+            db.Appointments.Add(a);
+            await db.SaveChangesAsync(ct);
+            return Results.Created($"/api/appointments/{a.Id}", ToDto(a));
+        });
+
+        appointments.MapPut("/{id:int}", async (int id, AppointmentInput input, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            var a = await db.Appointments.Include(x => x.Attendees)
+                .FirstOrDefaultAsync(x => x.Id == id && x.UserId == u.UserId(), ct);
+            if (a is null) return Results.NotFound();
+
+            a.Title = input.Title;
+            a.Category = input.Category;
+            a.StartsAt = input.StartsAt;
+            a.EndsAt = input.EndsAt;
+            a.Location = input.Location;
+            a.ReminderDays = input.ReminderDays;
+            a.Notes = input.Notes;
+            a.IsDone = input.IsDone;
+
+            db.AppointmentAttendees.RemoveRange(a.Attendees);
+            a.Attendees = (input.AttendeeIds ?? new()).Distinct()
+                .Select(mid => new AppointmentAttendee { AppointmentId = id, FamilyMemberId = mid }).ToList();
+
+            await db.SaveChangesAsync(ct);
+            return Results.Ok(ToDto(a));
+        });
+
+        appointments.MapDelete("/{id:int}", async (int id, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            var a = await db.Appointments.FirstOrDefaultAsync(x => x.Id == id && x.UserId == u.UserId(), ct);
+            if (a is null) return Results.NotFound();
+            db.Remove(a);
+            await db.SaveChangesAsync(ct);
+            return Results.NoContent();
+        });
 
         // ---- authority cases with nested checklist ----
         var cases = app.MapGroup("/api/authority-cases").RequireAuthorization().WithTags("authorities");
@@ -287,6 +359,10 @@ public static class ModuleEndpoints
             }
         });
     }
+
+    private static AppointmentDto ToDto(Appointment a) => new(
+        a.Id, a.UserId, a.Title, a.Category, a.StartsAt, a.EndsAt, a.Location,
+        a.ReminderDays, a.Notes, a.IsDone, a.Attendees.Select(x => x.FamilyMemberId).ToList());
 
     private static string? ResolveStoragePath(string? rawPath)
     {

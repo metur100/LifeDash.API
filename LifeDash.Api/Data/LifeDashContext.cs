@@ -29,6 +29,7 @@ public class LifeDashContext : DbContext
     public DbSet<Income> Incomes => Set<Income>();
     public DbSet<FixedCost> FixedCosts => Set<FixedCost>();
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
+    public DbSet<AppointmentAttendee> AppointmentAttendees => Set<AppointmentAttendee>();
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<HomeItem> HomeItems => Set<HomeItem>();
     public DbSet<Trip> Trips => Set<Trip>();
@@ -45,11 +46,23 @@ public class LifeDashContext : DbContext
             .WithMany()
             .HasForeignKey(x => x.FamilyMemberId)
             .OnDelete(DeleteBehavior.SetNull);
-        b.Entity<Appointment>()
+        b.Entity<AppointmentAttendee>()
+            .HasKey(x => new { x.AppointmentId, x.FamilyMemberId });
+        b.Entity<AppointmentAttendee>()
+            .HasOne(x => x.Appointment!)
+            .WithMany(a => a.Attendees)
+            .HasForeignKey(x => x.AppointmentId)
+            .OnDelete(DeleteBehavior.Cascade);
+        b.Entity<AppointmentAttendee>()
             .HasOne<FamilyMember>()
             .WithMany()
             .HasForeignKey(x => x.FamilyMemberId)
-            .OnDelete(DeleteBehavior.SetNull);
+            .OnDelete(DeleteBehavior.NoAction);
+        b.Entity<Subscription>()
+            .HasOne<FamilyMember>()
+            .WithMany()
+            .HasForeignKey(x => x.FamilyMemberId)
+            .OnDelete(DeleteBehavior.ClientSetNull);
         b.Entity<ImportantDate>()
             .HasOne<FamilyMember>()
             .WithMany()

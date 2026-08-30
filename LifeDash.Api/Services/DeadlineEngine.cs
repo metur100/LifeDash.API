@@ -116,20 +116,24 @@ public class DeadlineEngine(LifeDashContext db)
             if (s.CancelByOn is { } cancel && cancel <= horizon)
             {
                 var days = cancel.DayNumber - today.DayNumber;
+                var tail = s.FlowType != "none"
+                    ? " — danach verlängert sich der Vertrag automatisch."
+                    : ".";
                 alerts.Add(new Alert(
                     $"sub-cancel-{s.Id}", "finance", "renewal", Grade(days, 21),
                     s.Name,
-                    $"Kündigungsfrist endet {Countdown(days)} — danach verlängert sich der Vertrag automatisch.",
-                    cancel, days, "Abo prüfen", "/finance", "Subscription", s.Id));
+                    $"Kündigungsfrist endet {Countdown(days)}{tail}",
+                    cancel, days, "Vertrag prüfen", "/contracts", "Subscription", s.Id));
             }
-            else if (s.RenewsOn <= horizon)
+            else if (s.FlowType != "none" && s.RenewsOn <= horizon)
             {
                 var days = s.RenewsOn.DayNumber - today.DayNumber;
+                var verb = s.FlowType == "income" ? "Nächste Zahlung" : "Verlängert sich";
                 alerts.Add(new Alert(
                     $"sub-{s.Id}", "finance", "renewal", days <= 7 ? AlertSeverity.Soon : AlertSeverity.Info,
                     s.Name,
-                    $"Verlängert sich {Countdown(days)} für {s.Amount:0.00} {s.Currency}.",
-                    s.RenewsOn, days, "Abo prüfen", "/finance", "Subscription", s.Id));
+                    $"{verb} {Countdown(days)} für {s.Amount ?? 0m:0.00} {s.Currency}.",
+                    s.RenewsOn, days, "Vertrag prüfen", "/contracts", "Subscription", s.Id));
             }
         }
 
@@ -235,16 +239,16 @@ public class DeadlineEngine(LifeDashContext db)
     {
         var list = new List<Insight>();
 
-        // subscriptions renewing next calendar month
+        // contracts renewing next calendar month (cost or income, not "none")
         var firstNext = new DateOnly(today.Year, today.Month, 1).AddMonths(1);
         var endNext = firstNext.AddMonths(1).AddDays(-1);
-        var renewing = subs.Where(s => s.RenewsOn >= firstNext && s.RenewsOn <= endNext).ToList();
+        var renewing = subs.Where(s => s.FlowType != "none" && s.RenewsOn >= firstNext && s.RenewsOn <= endNext).ToList();
         if (renewing.Count > 0)
         {
-            var total = renewing.Sum(s => s.Amount);
+            var total = renewing.Sum(s => s.Amount ?? 0m);
             list.Add(new Insight("subs-next-month", "💡",
-                $"{renewing.Count} Abos verlängern sich nächsten Monat für zusammen {total:0.00} €.",
-                "/finance"));
+                $"{renewing.Count} Verträge verlängern sich nächsten Monat für zusammen {total:0.00} €.",
+                "/contracts"));
         }
 
         // missing mandatory documents
@@ -257,8 +261,9 @@ public class DeadlineEngine(LifeDashContext db)
         // budget check
         var income = await MonthlyIncomeAsync(userId, ct);
         var costs = await MonthlyFixedCostsAsync(userId, ct);
-        var subMonthly = subs.Sum(MonthlyEquivalent);
-        var balance = income - costs - subMonthly;
+        var subMonthly = subs.Where(s => s.FlowType == "cost").Sum(MonthlyEquivalent);
+        var contractIncome = subs.Where(s => s.FlowType == "income").Sum(MonthlyEquivalent);
+        var balance = income - costs - subMonthly + contractIncome;
         if (income > 0)
         {
             list.Add(balance < 0
@@ -286,7 +291,8 @@ public class DeadlineEngine(LifeDashContext db)
     {
         var income = await MonthlyIncomeAsync(userId, ct);
         var costs = await MonthlyFixedCostsAsync(userId, ct);
-        var subMonthly = subs.Sum(MonthlyEquivalent);
+        var subMonthly = subs.Where(s => s.FlowType == "cost").Sum(MonthlyEquivalent);
+        var contractIncome = subs.Where(s => s.FlowType == "income").Sum(MonthlyEquivalent);
         var openTasks = await db.Tasks.CountAsync(t => t.UserId == userId && !t.IsDone, ct);
         var missing = cases.SelectMany(c => c.RequiredDocuments)
                            .Count(r => r.IsMandatory && r.DocumentId == null);
@@ -299,7 +305,8 @@ public class DeadlineEngine(LifeDashContext db)
             Math.Round(income, 2),
             Math.Round(costs, 2),
             Math.Round(subMonthly, 2),
-            Math.Round(income - costs - subMonthly, 2),
+            Math.Round(contractIncome, 2),
+            Math.Round(income - costs - subMonthly + contractIncome, 2),
             openTasks,
             missing,
             nextTrip?.Title,
@@ -332,25 +339,19 @@ public class DeadlineEngine(LifeDashContext db)
         });
     }
 
-    private static decimal MonthlyEquivalent(Models.Subscription s) => s.Cadence switch
+    private static decimal MonthlyEquivalent(Models.Subscription s)
     {
-        "yearly" => s.Amount / 12m,
-        "quarterly" => s.Amount / 3m,
-        _ => s.Amount
-    };
-
-    private static DateOnly? NextOccurrence(DateOnly value, bool yearly, DateOnly today)
-    {
-        if (!yearly) return value >= today ? value : null;
-        var day = Math.Min(value.Day, DateTime.DaysInMonth(today.Year, value.Month));
-        var candidate = new DateOnly(today.Year, value.Month, day);
-        if (candidate < today)
+        var amount = s.Amount ?? 0m;
+        return s.Cadence switch
         {
-            day = Math.Min(value.Day, DateTime.DaysInMonth(today.Year + 1, value.Month));
-            candidate = new DateOnly(today.Year + 1, value.Month, day);
-        }
-        return candidate;
+            "yearly" => amount / 12m,
+            "quarterly" => amount / 3m,
+            _ => amount
+        };
     }
+
+    private static DateOnly? NextOccurrence(DateOnly value, bool yearly, DateOnly today) =>
+        DateOccurrence.NextYearlyOrOnce(value, yearly, today);
 
     private static string MapModule(string category) => category switch
     {

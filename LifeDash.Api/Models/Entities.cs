@@ -29,6 +29,7 @@ public class FamilyMember : OwnedEntity
     [MaxLength(160)] public string? SchoolName { get; set; }
     [MaxLength(40)]  public string? SchoolGrade { get; set; }
     [MaxLength(1000)]public string? SchoolNote { get; set; }
+    [MaxLength(20)]  public string? Jmbg { get; set; }
     [MaxLength(2000)]public string? Notes { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
@@ -52,7 +53,6 @@ public class Document : OwnedEntity
 
 public class Appointment : OwnedEntity
 {
-    public int? FamilyMemberId { get; set; }
     [MaxLength(200)] public string Title { get; set; } = "";
     [MaxLength(40)]  public string Category { get; set; } = "family";
     public DateTime StartsAt { get; set; }
@@ -61,6 +61,15 @@ public class Appointment : OwnedEntity
     public int ReminderDays { get; set; } = 3;
     [MaxLength(2000)]public string? Notes { get; set; }
     public bool IsDone { get; set; }
+    public List<AppointmentAttendee> Attendees { get; set; } = new();
+}
+
+public class AppointmentAttendee
+{
+    public int AppointmentId { get; set; }
+    public int FamilyMemberId { get; set; }
+    [JsonIgnore]
+    public Appointment? Appointment { get; set; }
 }
 
 public class ImportantDate : OwnedEntity
@@ -130,12 +139,17 @@ public class Subscription : OwnedEntity
 {
     [MaxLength(200)] public string Name { get; set; } = "";
     [MaxLength(200)] public string? Provider { get; set; }
-    [Column(TypeName="decimal(12,2)")] public decimal Amount { get; set; }
+    [MaxLength(10)]  public string FlowType { get; set; } = "cost"; // none | cost | income
+    public int? FamilyMemberId { get; set; }
+    [Column(TypeName="decimal(12,2)")] public decimal? Amount { get; set; }
     [MaxLength(3)]   public string Currency { get; set; } = "EUR";
     [MaxLength(20)]  public string Cadence { get; set; } = "monthly";
+    public DateOnly? StartOn { get; set; }
+    public DateOnly? EndOn { get; set; }
     public DateOnly RenewsOn { get; set; }
     public DateOnly? CancelByOn { get; set; }
     public int? NoticePeriodDays { get; set; }
+    [MaxLength(500)] public string? NoticeText { get; set; }
     public bool IsActive { get; set; } = true;
     [MaxLength(1000)]public string? Notes { get; set; }
 }

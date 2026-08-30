@@ -28,6 +28,7 @@ public record DashboardSummary(
     decimal MonthlyIncome,
     decimal MonthlyFixedCosts,
     decimal MonthlySubscriptions,
+    decimal MonthlyContractIncome,
     decimal MonthlyBalance,
     int OpenTasks,
     int MissingDocuments,
