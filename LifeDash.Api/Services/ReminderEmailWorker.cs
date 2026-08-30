@@ -17,8 +17,11 @@ public class ReminderEmailWorker : BackgroundService
     private const string FlightSentTag = "[flight-checkin-reminder-sent]";
     private const string BirthdaySentTag = "[birthday-reminder-sent]";
     private const string PaymentSentTag = "[payment-reminder-sent]";
+    private const string FixedCostSentTag = "[fixedcost-reminder-sent]";
     private const string IncomeSentTag = "[income-reminder-sent]";
     private const string ContractCancelSentTag = "[contract-cancel-reminder-sent]";
+    private const string AuthorityCaseSentTag = "[authority-case-reminder-sent]";
+    private static readonly string[] ClosedAuthorityStatuses = { "closed", "approved", "rejected" };
 
     public ReminderEmailWorker(
         IServiceScopeFactory scopeFactory,
@@ -64,8 +67,10 @@ public class ReminderEmailWorker : BackgroundService
         await SendFlightRemindersAsync(db, now, ct);
         await SendBirthdayRemindersAsync(db, memberNames, today, ct);
         await SendPaymentRemindersAsync(db, today, ct);
+        await SendFixedCostRemindersAsync(db, today, ct);
         await SendIncomeRemindersAsync(db, today, ct);
         await SendContractCancelRemindersAsync(db, memberNames, today, ct);
+        await SendAuthorityCaseRemindersAsync(db, memberNames, today, ct);
 
         await db.SaveChangesAsync(ct);
     }
@@ -198,6 +203,85 @@ public class ReminderEmailWorker : BackgroundService
         }
     }
 
+    private async Task SendFixedCostRemindersAsync(LifeDashContext db, DateOnly today, CancellationToken ct)
+    {
+        var due = today.AddDays(1);
+        var costs = await db.FixedCosts
+            .Where(c => c.IsActive && c.DayOfMonth != null)
+            .ToListAsync(ct);
+
+        foreach (var c in costs)
+        {
+            var (billingDate, isVariable) = ParseFixedCostMeta(c.Notes);
+            if (isVariable) continue; // no predictable due date to remind about
+
+            var anchor = billingDate ?? DateOccurrence.NextMonthly(c.DayOfMonth, today);
+            if (anchor is null) continue;
+            var nextDue = DateOccurrence.NextFromAnchor(anchor.Value, c.Cadence, today);
+            if (nextDue != due) continue;
+
+            // Once a projected occurrence has been marked paid once, the app
+            // materializes a real Payment row for the next one (so "paid" can
+            // be tracked) - the underlying FixedCost still projects that same
+            // date too. If a matching unpaid Payment already exists for this
+            // exact occurrence, SendPaymentRemindersAsync will handle it -
+            // skip here so it's one email, not two.
+            var duplicatePayment = await db.Payments.AnyAsync(p =>
+                !p.IsPaid && p.DueOn == nextDue && p.Title == c.Name &&
+                (p.Category ?? "") == (c.Category ?? "") &&
+                Math.Abs(p.Amount - c.Amount) < 0.005m, ct);
+            if (duplicatePayment) continue;
+
+            var marker = MarkerFor(FixedCostSentTag, nextDue);
+            if (HasMarker(c.Notes, marker)) continue;
+
+            var subject = $"Fixkosten morgen fällig: {c.Name}";
+            var body = EmailTemplate.Render(
+                "#ef4444", "💳", "Finanzen · Fixkosten", c.Name, "Morgen fällig",
+                "Diese wiederkehrenden Kosten sind morgen fällig.",
+                new[]
+                {
+                    ("Betrag", $"{c.Amount:0.00} {c.Currency}"),
+                    ("Fällig am", nextDue.ToString("dd.MM.yyyy")),
+                    ("Turnus", c.Cadence),
+                    ("Kategorie", c.Category ?? ""),
+                },
+                AppUrl("/finance"), "In Finanzen öffnen",
+                "LifeDash erinnert dich automatisch einen Tag vor jeder fälligen Fixkosten-Zahlung.");
+
+            if (await TrySendEmailAsync(subject, body, ct))
+                c.Notes = AppendMarker(c.Notes, marker);
+        }
+    }
+
+    private static (DateOnly? BillingDate, bool IsVariable) ParseFixedCostMeta(string? notes)
+    {
+        const string startTag = "[finance-meta]";
+        const string endTag = "[/finance-meta]";
+        if (string.IsNullOrWhiteSpace(notes)) return (null, false);
+
+        var start = notes.IndexOf(startTag, StringComparison.Ordinal);
+        var end = notes.IndexOf(endTag, StringComparison.Ordinal);
+        if (start < 0 || end < 0 || end <= start) return (null, false);
+
+        var block = notes[(start + startTag.Length)..end];
+        DateOnly? billingDate = null;
+        var isVariable = false;
+
+        foreach (var rawLine in block.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            var idx = line.IndexOf(':');
+            if (idx <= 0) continue;
+            var key = line[..idx].Trim();
+            var value = line[(idx + 1)..].Trim();
+            if (key == "billingDate" && DateOnly.TryParse(value, out var d)) billingDate = d;
+            if (key == "costType" && value == "variable") isVariable = true;
+        }
+
+        return (billingDate, isVariable);
+    }
+
     private async Task SendIncomeRemindersAsync(LifeDashContext db, DateOnly today, CancellationToken ct)
     {
         var incomes = await db.Incomes
@@ -259,6 +343,39 @@ public class ReminderEmailWorker : BackgroundService
 
             if (await TrySendEmailAsync(subject, body, ct))
                 s.Notes = AppendMarker(s.Notes, marker);
+        }
+    }
+
+    private async Task SendAuthorityCaseRemindersAsync(LifeDashContext db, Dictionary<int, string> memberNames, DateOnly today, CancellationToken ct)
+    {
+        var due = today.AddDays(1);
+        var cases = await db.AuthorityCases
+            .Where(c => !ClosedAuthorityStatuses.Contains(c.Status) && c.DeadlineOn == due)
+            .ToListAsync(ct);
+
+        foreach (var c in cases)
+        {
+            var marker = MarkerFor(AuthorityCaseSentTag, c.DeadlineOn!.Value);
+            if (HasMarker(c.Notes, marker)) continue;
+
+            var person = c.FamilyMemberId is { } mid ? memberNames.GetValueOrDefault(mid, "") : "";
+            var subject = $"Frist morgen: {c.Title}";
+            var body = EmailTemplate.Render(
+                "#7c3aed", "🏛️", "Behörden · Frist", c.Title, "Frist morgen",
+                "Die Frist für diesen Behördenvorgang endet morgen.",
+                new[]
+                {
+                    ("Frist", c.DeadlineOn.Value.ToString("dd.MM.yyyy")),
+                    ("Behörde", c.Authority ?? ""),
+                    ("Aktenzeichen", c.ReferenceNo ?? ""),
+                    ("Status", c.Status),
+                    ("Person", person),
+                },
+                AppUrl($"/authorities/{c.Id}"), "Vorgang ansehen",
+                "LifeDash erinnert dich automatisch einen Tag vor jeder Behördenfrist.");
+
+            if (await TrySendEmailAsync(subject, body, ct))
+                c.Notes = AppendMarker(c.Notes, marker);
         }
     }
 

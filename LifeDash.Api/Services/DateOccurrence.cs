@@ -35,4 +35,26 @@ public static class DateOccurrence
         }
         return candidate;
     }
+
+    /// <summary>
+    /// Next occurrence of a recurring anchor date (monthly/quarterly/yearly),
+    /// stepping forward from the original anchor each time - not from the
+    /// previous result, which would permanently drag e.g. a 31st down to
+    /// whatever a short month in between clamped it to. DateOnly.AddMonths
+    /// already clamps the day to the target month's length.
+    /// </summary>
+    public static DateOnly NextFromAnchor(DateOnly anchor, string cadence, DateOnly today)
+    {
+        var step = cadence switch { "monthly" => 1, "quarterly" => 3, "yearly" => 12, _ => 0 };
+        if (step == 0) return anchor;
+
+        var due = anchor;
+        var n = 0;
+        while (due < today && n < 240)
+        {
+            n += 1;
+            due = anchor.AddMonths(n * step);
+        }
+        return due;
+    }
 }
