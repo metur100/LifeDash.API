@@ -76,6 +76,7 @@ public class ImportantDate : OwnedEntity
 {
     public int? FamilyMemberId { get; set; }
     [MaxLength(200)] public string Title { get; set; } = "";
+    [MaxLength(30)]  public string Category { get; set; } = "other"; // birthday|wedding|anniversary|other
     public DateOnly DateValue { get; set; }
     public bool RepeatsYearly { get; set; } = true;
     public int ReminderDays { get; set; } = 14;
