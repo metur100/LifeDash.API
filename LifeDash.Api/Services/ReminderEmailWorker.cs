@@ -13,13 +13,6 @@ public class ReminderEmailWorker : BackgroundService
     private readonly ReminderEmailOptions _options;
     private readonly ILogger<ReminderEmailWorker> _logger;
 
-    // Every reminder except same-day Termine/Flüge only actually sends once
-    // local time reaches this hour - otherwise a date match right after
-    // midnight would go out at 00:05 instead of a predictable time each day.
-    // Same-day appointment/flight reminders are the one exception: waiting
-    // until 11:00 could mean sending them after the event already happened.
-    private const int SendHour = 11;
-
     // "1 day before" markers
     private const string AppointmentSentTag = "[appt-reminder-sent]";
     private const string FlightSentTag = "[flight-checkin-reminder-sent]";
@@ -29,11 +22,9 @@ public class ReminderEmailWorker : BackgroundService
     private const string ContractCancelSentTag = "[contract-cancel-reminder-sent]";
     private const string AuthorityCaseSentTag = "[authority-case-reminder-sent]";
 
-    // "on the due day itself" markers - Wichtige Daten (birthdays) and
-    // Aufgaben already only ever send on the day, so they have no separate
-    // "day before" tag/pass.
+    // "on the due day itself" markers - Wichtige Daten (birthdays) already only
+    // ever sends on the day, so it has no separate "day before" tag/pass.
     private const string BirthdaySentTag = "[birthday-reminder-sent]";
-    private const string TaskSentTag = "[task-due-today-sent]";
     private const string AppointmentDueTodaySentTag = "[appt-due-today-sent]";
     private const string FlightDueTodaySentTag = "[flight-due-today-sent]";
     private const string PaymentDueTodaySentTag = "[payment-due-today-sent]";
@@ -80,30 +71,24 @@ public class ReminderEmailWorker : BackgroundService
 
         var now = DateTime.Now;
         var today = DateOnly.FromDateTime(now.Date);
-        var afterSendHour = now.Hour >= SendHour;
 
         var memberNames = await db.FamilyMembers.AsNoTracking()
             .ToDictionaryAsync(m => m.Id, m => m.FullName, ct);
 
-        await SendAppointmentRemindersAsync(db, memberNames, now, today, afterSendHour, ct);
-        await SendFlightRemindersAsync(db, now, today, afterSendHour, ct);
-        if (afterSendHour)
-        {
-            await SendBirthdayRemindersAsync(db, memberNames, today, ct);
-            await SendTaskRemindersAsync(db, today, ct);
-            await SendPaymentRemindersAsync(db, today, ct);
-            await SendFixedCostRemindersAsync(db, today, ct);
-            await SendIncomeRemindersAsync(db, today, ct);
-            await SendContractCancelRemindersAsync(db, memberNames, today, ct);
-            await SendAuthorityCaseRemindersAsync(db, memberNames, today, ct);
-        }
+        await SendAppointmentRemindersAsync(db, memberNames, now, ct);
+        await SendFlightRemindersAsync(db, now, ct);
+        await SendBirthdayRemindersAsync(db, memberNames, today, ct);
+        await SendPaymentRemindersAsync(db, today, ct);
+        await SendFixedCostRemindersAsync(db, today, ct);
+        await SendIncomeRemindersAsync(db, today, ct);
+        await SendContractCancelRemindersAsync(db, memberNames, today, ct);
+        await SendAuthorityCaseRemindersAsync(db, memberNames, today, ct);
 
         await db.SaveChangesAsync(ct);
     }
 
-    private async Task SendAppointmentRemindersAsync(LifeDashContext db, Dictionary<int, string> memberNames, DateTime now, DateOnly today, bool afterSendHour, CancellationToken ct)
+    private async Task SendAppointmentRemindersAsync(LifeDashContext db, Dictionary<int, string> memberNames, DateTime now, CancellationToken ct)
     {
-        var tomorrow = today.AddDays(1);
         var appointments = await db.Appointments
             .Include(a => a.Attendees)
             .Where(a => !a.IsDone)
@@ -111,7 +96,6 @@ public class ReminderEmailWorker : BackgroundService
 
         foreach (var a in appointments)
         {
-            var eventDate = DateOnly.FromDateTime(a.StartsAt);
             var attendees = a.Attendees.Select(x => memberNames.GetValueOrDefault(x.FamilyMemberId, "-")).ToList();
             var rows = new[]
             {
@@ -121,20 +105,18 @@ public class ReminderEmailWorker : BackgroundService
                 ("Teilnehmer", attendees.Count > 0 ? string.Join(", ", attendees) : ""),
             };
 
-            if (afterSendHour && eventDate == tomorrow)
+            if (ShouldSendOneDayBefore(a.StartsAt, now))
             {
                 var body = EmailTemplate.Render(
                     "#4f6df5", "📅", "Termin", a.Title, "Morgen fällig",
                     "Dieser Termin steht morgen an.", rows,
                     AppUrl("/family"), "Termin ansehen",
                     "LifeDash erinnert dich automatisch einen Tag vor jedem Termin.");
-                await SendReminderAsync(a.Notes, MarkerFor(AppointmentSentTag, eventDate),
+                await SendReminderAsync(a.Notes, MarkerFor(AppointmentSentTag, a.StartsAt),
                     $"Erinnerung morgen: {a.Title}", body, ct, n => a.Notes = n);
             }
 
-            // Same-day reminder is deliberately NOT gated to SendHour - waiting
-            // until 11:00 could mean sending it after the appointment already happened.
-            if (eventDate == today && a.StartsAt > now)
+            if (ShouldSendOnDueDay(a.StartsAt, now))
             {
                 var body = EmailTemplate.Render(
                     "#4f6df5", "📅", "Termin", a.Title, "Heute",
@@ -147,9 +129,8 @@ public class ReminderEmailWorker : BackgroundService
         }
     }
 
-    private async Task SendFlightRemindersAsync(LifeDashContext db, DateTime now, DateOnly today, bool afterSendHour, CancellationToken ct)
+    private async Task SendFlightRemindersAsync(LifeDashContext db, DateTime now, CancellationToken ct)
     {
-        var tomorrow = today.AddDays(1);
         var flights = await db.Bookings
             .Include(b => b.Trip)
             .Where(b => b.Kind == "flight" && b.StartsAt != null)
@@ -158,7 +139,6 @@ public class ReminderEmailWorker : BackgroundService
         foreach (var b in flights)
         {
             if (b.StartsAt is not { } startsAt) continue;
-            var eventDate = DateOnly.FromDateTime(startsAt);
             var rows = new[]
             {
                 ("Reise", b.Trip?.Title ?? ""),
@@ -167,19 +147,18 @@ public class ReminderEmailWorker : BackgroundService
                 ("Betrag", b.Amount is { } amt ? $"{amt:0.00} {b.Currency}" : ""),
             };
 
-            if (afterSendHour && eventDate == tomorrow)
+            if (ShouldSendOneDayBefore(startsAt, now))
             {
                 var body = EmailTemplate.Render(
-                    "#0ea5a3", "✈️", "Reise · Check-in", b.Title, "Morgen",
-                    "Der Check-in für diesen Flug öffnet morgen.", rows,
+                    "#0ea5a3", "✈️", "Reise · Check-in", b.Title, "In 24 Std.",
+                    "Der Check-in für diesen Flug öffnet in den nächsten 24 Stunden.", rows,
                     AppUrl($"/travel/{b.TripId}"), "Reise ansehen",
-                    "LifeDash erinnert dich automatisch einen Tag vor jedem Flug.");
-                await SendReminderAsync(b.Notes, MarkerFor(FlightSentTag, eventDate),
+                    "LifeDash erinnert dich automatisch 24 Stunden vor jedem Flug.");
+                await SendReminderAsync(b.Notes, MarkerFor(FlightSentTag, startsAt),
                     $"Check-in Erinnerung morgen: {b.Title}", body, ct, n => b.Notes = n);
             }
 
-            // Same as appointments: not gated to SendHour, so it still lands before departure.
-            if (eventDate == today && startsAt > now)
+            if (ShouldSendOnDueDay(startsAt, now))
             {
                 var body = EmailTemplate.Render(
                     "#0ea5a3", "✈️", "Reise · Heute", b.Title, "Heute",
@@ -215,31 +194,6 @@ public class ReminderEmailWorker : BackgroundService
 
             await SendReminderAsync(i.Notes, MarkerFor(BirthdaySentTag, occurrence.Value),
                 $"Heute: {i.Title}", body, ct, n => i.Notes = n);
-        }
-    }
-
-    private async Task SendTaskRemindersAsync(LifeDashContext db, DateOnly today, CancellationToken ct)
-    {
-        var tasks = await db.Tasks
-            .Where(t => !t.IsDone && t.DueOn == today)
-            .ToListAsync(ct);
-
-        foreach (var t in tasks)
-        {
-            var body = EmailTemplate.Render(
-                "#0891b2", "✅", "Aufgabe", t.Title, "Heute fällig",
-                "Diese Aufgabe ist heute fällig.",
-                new[]
-                {
-                    ("Fällig am", t.DueOn!.Value.ToString("dd.MM.yyyy")),
-                    ("Priorität", t.Priority),
-                    ("Bereich", t.Module),
-                },
-                AppUrl("/tasks"), "Aufgabe ansehen",
-                "LifeDash erinnert dich automatisch am Fälligkeitstag jeder Aufgabe.");
-
-            await SendReminderAsync(t.Notes, MarkerFor(TaskSentTag, t.DueOn.Value),
-                $"Heute fällig: {t.Title}", body, ct, n => t.Notes = n);
         }
     }
 
@@ -512,6 +466,17 @@ public class ReminderEmailWorker : BackgroundService
             && !string.IsNullOrWhiteSpace(_options.FromEmail)
             && !string.IsNullOrWhiteSpace(_options.ToEmail);
     }
+
+    private static bool ShouldSendOneDayBefore(DateTime eventAt, DateTime now)
+    {
+        if (eventAt <= now) return false;
+        if (eventAt.Date == now.Date) return false; // that's "due day", handled separately
+        var remindAt = eventAt.AddDays(-1);
+        return now >= remindAt;
+    }
+
+    private static bool ShouldSendOnDueDay(DateTime eventAt, DateTime now) =>
+        eventAt.Date == now.Date && eventAt > now;
 
     private static string MarkerFor(string tag, DateTime dateTime) => $"{tag}:{dateTime:yyyyMMddHHmm}";
     private static string MarkerFor(string tag, DateOnly date) => $"{tag}:{date:yyyyMMdd}";
