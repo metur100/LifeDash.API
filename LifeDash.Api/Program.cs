@@ -92,6 +92,11 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<LifeDashContext>();
     try
     {
+        await db.Database.ExecuteSqlRawAsync("""
+            IF COL_LENGTH('dbo.Trips', 'StartPlace') IS NULL
+                ALTER TABLE dbo.Trips ADD StartPlace NVARCHAR(200) NULL;
+            """);
+
         var seeded = db.Users.FirstOrDefault(u => u.PasswordHash == "SEED");
         if (seeded is not null)
         {

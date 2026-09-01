@@ -211,7 +211,7 @@ public static class ModuleEndpoints
         {
             var t = await db.Trips.FirstOrDefaultAsync(x => x.Id == id && x.UserId == u.UserId(), ct);
             if (t is null) return Results.NotFound();
-            t.Title = input.Title; t.Destination = input.Destination;
+            t.Title = input.Title; t.StartPlace = input.StartPlace; t.Destination = input.Destination;
             t.StartsOn = input.StartsOn; t.EndsOn = input.EndsOn;
             t.Status = input.Status; t.Budget = input.Budget; t.Notes = input.Notes;
             await db.SaveChangesAsync(ct);

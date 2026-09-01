@@ -186,6 +186,7 @@ public class HomeItem : OwnedEntity
 public class Trip : OwnedEntity
 {
     [MaxLength(200)] public string Title { get; set; } = "";
+    [MaxLength(200)] public string? StartPlace { get; set; }
     [MaxLength(200)] public string? Destination { get; set; }
     public DateOnly StartsOn { get; set; }
     public DateOnly? EndsOn { get; set; }
