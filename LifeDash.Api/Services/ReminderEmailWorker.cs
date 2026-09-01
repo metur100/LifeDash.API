@@ -13,12 +13,12 @@ public class ReminderEmailWorker : BackgroundService
     private readonly ReminderEmailOptions _options;
     private readonly ILogger<ReminderEmailWorker> _logger;
 
-    // Every reminder except same-day Termine/Flüge only actually sends once
+    // Every reminder except the time-based flight and appointment reminders only actually sends once
     // local time reaches this hour - otherwise a date match right after
     // midnight would go out at 00:05 instead of a predictable time each day.
-    // Same-day appointment/flight reminders are the one exception: waiting
-    // until 11:00 could mean sending them after the event already happened.
-    private const int SendHour = 11;
+    // Time-based flight and appointment reminders are the exception: waiting
+    // until 08:00 could mean sending them after the event already happened.
+    private const int SendHour = 8;
 
     // "1 day before" markers
     private const string AppointmentSentTag = "[appt-reminder-sent]";
@@ -34,7 +34,7 @@ public class ReminderEmailWorker : BackgroundService
     // "day before" tag/pass.
     private const string BirthdaySentTag = "[birthday-reminder-sent]";
     private const string TaskSentTag = "[task-due-today-sent]";
-    private const string AppointmentDueTodaySentTag = "[appt-due-today-sent]";
+    private const string AppointmentOneHourSentTag = "[appt-one-hour-reminder-sent]";
     private const string FlightDueTodaySentTag = "[flight-due-today-sent]";
     private const string PaymentDueTodaySentTag = "[payment-due-today-sent]";
     private const string FixedCostDueTodaySentTag = "[fixedcost-due-today-sent]";
@@ -136,17 +136,16 @@ public class ReminderEmailWorker : BackgroundService
                     $"Erinnerung morgen: {a.Title}", body, ct, n => a.Notes = n);
             }
 
-            // Same-day reminder is deliberately NOT gated to SendHour - waiting
-            // until 11:00 could mean sending it after the appointment already happened.
-            if (eventDate == today && a.StartsAt > now)
+            var timeUntilAppointment = a.StartsAt - now;
+            if (timeUntilAppointment > TimeSpan.Zero && timeUntilAppointment <= TimeSpan.FromHours(1))
             {
                 var body = EmailTemplate.Render(
-                    "#4f6df5", "📅", "Termin", a.Title, "Heute",
-                    "Dieser Termin steht heute an.", rows,
+                    "#4f6df5", "📅", "Termin", a.Title, "In einer Stunde",
+                    "Dieser Termin beginnt in weniger als einer Stunde.", rows,
                     AppUrl("/family"), "Termin ansehen",
-                    "LifeDash erinnert dich automatisch am Tag des Termins.");
-                await SendReminderAsync(a.Notes, MarkerFor(AppointmentDueTodaySentTag, a.StartsAt),
-                    $"Heute: {a.Title}", body, ct, n => a.Notes = n);
+                    "LifeDash erinnert dich automatisch ungefähr eine Stunde vor dem Termin.");
+                await SendReminderAsync(a.Notes, MarkerFor(AppointmentOneHourSentTag, a.StartsAt),
+                    $"Termin in einer Stunde: {a.Title}", body, ct, n => a.Notes = n);
             }
         }
     }
@@ -203,7 +202,7 @@ public class ReminderEmailWorker : BackgroundService
                     ("Person", person),
                 },
                 AppUrl("/family"), "Im Familienbereich ansehen",
-                "LifeDash erinnert dich automatisch am Tag selbst an wiederkehrende wichtige Daten.");
+                "LifeDash erinnert dich automatisch am Tag selbst an wichtigen Anlässen.");
 
             await SendReminderAsync(i.Notes, MarkerFor(BirthdaySentTag, occurrence.Value),
                 $"Heute: {i.Title}", body, ct, n => i.Notes = n);
