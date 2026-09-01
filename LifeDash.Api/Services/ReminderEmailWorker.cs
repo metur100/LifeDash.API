@@ -73,12 +73,16 @@ public class ReminderEmailWorker : BackgroundService
 
     private async Task SendDueRemindersAsync(CancellationToken ct)
     {
-        if (!IsConfigured()) return;
+        if (!IsConfigured())
+        {
+            _logger.LogWarning("Reminder email is disabled because SMTP or recipient settings are incomplete.");
+            return;
+        }
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LifeDashContext>();
 
-        var now = DateTime.Now;
+        var now = GetLocalNow();
         var today = DateOnly.FromDateTime(now.Date);
         var afterSendHour = now.Hour >= SendHour;
 
@@ -86,7 +90,7 @@ public class ReminderEmailWorker : BackgroundService
             .ToDictionaryAsync(m => m.Id, m => m.FullName, ct);
 
         await SendAppointmentRemindersAsync(db, memberNames, now, today, afterSendHour, ct);
-        await SendFlightRemindersAsync(db, now, today, afterSendHour, ct);
+        await SendFlightRemindersAsync(db, now, today, ct);
         if (afterSendHour)
         {
             await SendBirthdayRemindersAsync(db, memberNames, today, ct);
@@ -147,9 +151,8 @@ public class ReminderEmailWorker : BackgroundService
         }
     }
 
-    private async Task SendFlightRemindersAsync(LifeDashContext db, DateTime now, DateOnly today, bool afterSendHour, CancellationToken ct)
+    private async Task SendFlightRemindersAsync(LifeDashContext db, DateTime now, DateOnly today, CancellationToken ct)
     {
-        var tomorrow = today.AddDays(1);
         var flights = await db.Bookings
             .Include(b => b.Trip)
             .Where(b => b.Kind == "flight" && b.StartsAt != null)
@@ -167,27 +170,16 @@ public class ReminderEmailWorker : BackgroundService
                 ("Betrag", b.Amount is { } amt ? $"{amt:0.00} {b.Currency}" : ""),
             };
 
-            if (afterSendHour && eventDate == tomorrow)
+            var hoursUntilDeparture = startsAt - now;
+            if (hoursUntilDeparture > TimeSpan.Zero && hoursUntilDeparture <= TimeSpan.FromHours(24))
             {
                 var body = EmailTemplate.Render(
-                    "#0ea5a3", "✈️", "Reise · Check-in", b.Title, "Morgen",
-                    "Der Check-in für diesen Flug öffnet morgen.", rows,
+                    "#0ea5a3", "✈️", "Reise · Check-in", b.Title, "In 24 Stunden",
+                    "Dieser Flug startet in weniger als 24 Stunden.", rows,
                     AppUrl($"/travel/{b.TripId}"), "Reise ansehen",
-                    "LifeDash erinnert dich automatisch einen Tag vor jedem Flug.");
-                await SendReminderAsync(b.Notes, MarkerFor(FlightSentTag, eventDate),
-                    $"Check-in Erinnerung morgen: {b.Title}", body, ct, n => b.Notes = n);
-            }
-
-            // Same as appointments: not gated to SendHour, so it still lands before departure.
-            if (eventDate == today && startsAt > now)
-            {
-                var body = EmailTemplate.Render(
-                    "#0ea5a3", "✈️", "Reise · Heute", b.Title, "Heute",
-                    "Dieser Flug ist heute.", rows,
-                    AppUrl($"/travel/{b.TripId}"), "Reise ansehen",
-                    "LifeDash erinnert dich automatisch am Tag des Flugs.");
-                await SendReminderAsync(b.Notes, MarkerFor(FlightDueTodaySentTag, startsAt),
-                    $"Heute: {b.Title}", body, ct, n => b.Notes = n);
+                    "LifeDash erinnert dich automatisch ungefähr 24 Stunden vor Abflug.");
+                await SendReminderAsync(b.Notes, MarkerFor(FlightSentTag, startsAt),
+                    $"Flug in 24 Stunden: {b.Title}", body, ct, n => b.Notes = n);
             }
         }
     }
@@ -503,6 +495,25 @@ public class ReminderEmailWorker : BackgroundService
     private string? AppUrl(string path) =>
         string.IsNullOrWhiteSpace(_options.AppBaseUrl) ? null : _options.AppBaseUrl!.TrimEnd('/') + path;
 
+    private DateTime GetLocalNow()
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(_options.TimeZoneId);
+            return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, zone);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            _logger.LogWarning("Reminder timezone {TimeZoneId} was not found; server local time will be used.", _options.TimeZoneId);
+            return DateTime.Now;
+        }
+        catch (InvalidTimeZoneException)
+        {
+            _logger.LogWarning("Reminder timezone {TimeZoneId} is invalid; server local time will be used.", _options.TimeZoneId);
+            return DateTime.Now;
+        }
+    }
+
     private bool IsConfigured()
     {
         return !string.IsNullOrWhiteSpace(_options.SmtpHost)
@@ -557,6 +568,7 @@ public class ReminderEmailWorker : BackgroundService
             };
 
             await smtp.SendMailAsync(mail, ct);
+            _logger.LogInformation("Reminder email sent to {Recipient}: {Subject}", _options.ToEmail, subject);
             return true;
         }
         catch (Exception ex)

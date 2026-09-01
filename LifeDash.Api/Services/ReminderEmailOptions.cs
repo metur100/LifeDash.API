@@ -10,4 +10,5 @@ public class ReminderEmailOptions
     public string? FromName { get; set; }
     public string? ToEmail { get; set; }
     public string? AppBaseUrl { get; set; }
+    public string TimeZoneId { get; set; } = "Europe/Berlin";
 }
