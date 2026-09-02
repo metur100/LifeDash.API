@@ -31,6 +31,7 @@ Edit `LifeDash.Api/appsettings.json`, or override with environment variables
 | `Storage__UploadPath` | Where uploaded documents are written |
 | `Storage__MaxUploadMb` | Upload size limit, default 20 |
 | `Swagger__Enabled` | Set to `false` in production |
+| `ReminderTrigger__ApiKey` | Secret required by the external reminder trigger. Use a random value of at least 32 characters. |
 
 ## API surface
 
@@ -99,6 +100,36 @@ Then, in the ASPnix control panel:
    once your account exists.
 
 Confirm the deployment with `https://your-domain/api/health`.
+
+## Keep reminder emails running on ASPnix
+
+ASPnix can stop an idle application, so use an external scheduler to call the
+reminder endpoint every five minutes. The endpoint runs all email reminder
+checks: appointments, flights, birthdays, tasks, payments, fixed costs, income,
+contract cancellation dates, and authority deadlines. Repeated calls do not
+resend a reminder that was already recorded as sent.
+
+1. Generate a random secret with `openssl rand -hex 32` (or another password
+   generator), then set it in the ASPnix environment as
+   `ReminderTrigger__ApiKey`. Do not put the real value in source control.
+2. In cron-job.org, create a new cron job with these settings:
+
+   | Field | Value |
+   |---|---|
+   | URL | `https://your-api-domain/api/jobs/reminders` |
+   | Request method | `POST` |
+   | Schedule | Every 5 minutes (`*/5 * * * *`) |
+   | Request header | `X-Reminder-Trigger: <the same random secret>` |
+   | Request body | Empty |
+
+3. Save the job, use **Run now** once, then inspect its execution history. A
+   successful call returns `{"status":"completed"}`. During an overlapping
+   request it returns `{"status":"already-running"}`; this is also a healthy
+   result. A `401` means the header value does not match, and a `503` means the
+   API key has not been configured on the server yet.
+
+The route only accepts `POST` and requires the secret header. Do not use the
+regular app JWT for this job.
 
 ## Security notes
 

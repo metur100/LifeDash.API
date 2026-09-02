@@ -28,7 +28,8 @@ builder.Services.AddScoped<DeadlineEngine>();
 builder.Services.AddSingleton<IAuditLogWriter, AuditLogWriter>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.Configure<ReminderEmailOptions>(builder.Configuration.GetSection("ReminderEmail"));
-builder.Services.AddHostedService<ReminderEmailWorker>();
+builder.Services.AddSingleton<ReminderEmailWorker>();
+builder.Services.AddHostedService(services => services.GetRequiredService<ReminderEmailWorker>());
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(o =>
@@ -130,6 +131,25 @@ app.MapGet("/api/health", async (LifeDashContext db) =>
     return ok ? Results.Ok(new { status = "healthy" })
               : Results.Json(new { status = "database unreachable" }, statusCode: 503);
 });
+
+app.MapPost("/api/jobs/reminders", async (HttpRequest request, IConfiguration configuration,
+    ReminderEmailWorker reminders, CancellationToken ct) =>
+{
+    var expectedKey = configuration["ReminderTrigger:ApiKey"];
+    var receivedKey = request.Headers["X-Reminder-Trigger"].ToString();
+    if (string.IsNullOrWhiteSpace(expectedKey))
+        return Results.Problem("ReminderTrigger:ApiKey is not configured.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    if (!string.Equals(receivedKey, expectedKey, StringComparison.Ordinal))
+        return Results.Unauthorized();
+
+    var result = await reminders.RunOnceAsync(ct);
+    return result switch
+    {
+        ReminderRunResult.Completed => Results.Ok(new { status = "completed" }),
+        ReminderRunResult.AlreadyRunning => Results.Ok(new { status = "already-running" }),
+        _ => Results.Problem("Reminder run failed. Check the application logs.", statusCode: StatusCodes.Status500InternalServerError)
+    };
+}).ExcludeFromDescription();
 
 app.MapGet("/api/logs", (HttpContext ctx, IAuditLogWriter audit, int? take) =>
 {

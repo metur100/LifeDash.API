@@ -12,6 +12,7 @@ public class ReminderEmailWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ReminderEmailOptions _options;
     private readonly ILogger<ReminderEmailWorker> _logger;
+    private readonly SemaphoreSlim _runLock = new(1, 1);
 
     // Every reminder except the time-based flight and appointment reminders only actually sends once
     // local time reaches this hour - otherwise a date match right after
@@ -60,7 +61,7 @@ public class ReminderEmailWorker : BackgroundService
         {
             try
             {
-                await SendDueRemindersAsync(stoppingToken);
+                await RunOnceAsync(stoppingToken);
             }
             catch (Exception ex)
             {
@@ -68,6 +69,30 @@ public class ReminderEmailWorker : BackgroundService
             }
 
             await Task.Delay(TimeSpan.FromMinutes(30), stoppingToken);
+        }
+    }
+
+    public async Task<ReminderRunResult> RunOnceAsync(CancellationToken ct)
+    {
+        if (!await _runLock.WaitAsync(0, ct))
+        {
+            _logger.LogInformation("Reminder run skipped because another run is still in progress.");
+            return ReminderRunResult.AlreadyRunning;
+        }
+
+        try
+        {
+            await SendDueRemindersAsync(ct);
+            return ReminderRunResult.Completed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Reminder worker run failed");
+            return ReminderRunResult.Failed;
+        }
+        finally
+        {
+            _runLock.Release();
         }
     }
 
@@ -576,4 +601,11 @@ public class ReminderEmailWorker : BackgroundService
             return false;
         }
     }
+}
+
+public enum ReminderRunResult
+{
+    Completed,
+    AlreadyRunning,
+    Failed
 }
