@@ -226,6 +226,23 @@ public class PackingItem
     public Trip? Trip { get; set; }
 }
 
+public class Package : OwnedEntity
+{
+    [MaxLength(200)] public string Title { get; set; } = "";
+    [MaxLength(20)]  public string Carrier { get; set; } = "dhl"; // dhl|dpd|hermes|gls|other
+    [MaxLength(120)] public string TrackingNumber { get; set; } = "";
+    [MaxLength(160)] public string? Sender { get; set; }
+    [MaxLength(30)]  public string Status { get; set; } = "in_transit"; // announced|in_transit|out_for_delivery|delivered|exception
+    public DateOnly? ExpectedDelivery { get; set; }
+    [MaxLength(300)] public string? LatestEvent { get; set; }
+    [MaxLength(60)]  public string? LatestEventTime { get; set; }
+    [MaxLength(20)]  public string Source { get; set; } = "manual"; // manual|email_scan
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+    // Sendungsverlauf: JSON array of { status, text, time, at }. Never queried by field, so a
+    // JSON blob column keeps this a plain flat entity usable with the generic owned CRUD.
+    [Column(TypeName = "nvarchar(max)")] public string? HistoryJson { get; set; }
+}
+
 public class TaskItem : OwnedEntity
 {
     [MaxLength(240)] public string Title { get; set; } = "";

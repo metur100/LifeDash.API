@@ -28,6 +28,9 @@ builder.Services.AddScoped<DeadlineEngine>();
 builder.Services.AddSingleton<IAuditLogWriter, AuditLogWriter>();
 builder.Services.AddHttpContextAccessor();
 builder.Services.Configure<ReminderEmailOptions>(builder.Configuration.GetSection("ReminderEmail"));
+builder.Services.Configure<MailTrackingOptions>(builder.Configuration.GetSection("MailTracking"));
+builder.Services.AddSingleton<MicrosoftMailAuthService>();
+builder.Services.AddScoped<ImapPackageScanner>();
 builder.Services.AddSingleton<ReminderEmailWorker>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ReminderEmailWorker>());
 

@@ -36,6 +36,7 @@ public class LifeDashContext : DbContext
     public DbSet<Booking> Bookings => Set<Booking>();
     public DbSet<PackingItem> PackingItems => Set<PackingItem>();
     public DbSet<TaskItem> Tasks => Set<TaskItem>();
+    public DbSet<Package> Packages => Set<Package>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {

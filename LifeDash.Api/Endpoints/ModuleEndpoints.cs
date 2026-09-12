@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json;
 using LifeDash.Api.Data;
 using LifeDash.Api.Dtos;
 using LifeDash.Api.Models;
@@ -21,6 +22,7 @@ public static class ModuleEndpoints
         app.MapOwned<HomeItem>("/api/home-items");
         app.MapOwned<TaskItem>("/api/tasks");
         app.MapOwned<Document>("/api/documents");
+        app.MapOwned<Package>("/api/packages");
 
         // ---- dashboard ----
         app.MapGet("/api/dashboard", async (int? horizonDays, DeadlineEngine engine,
@@ -358,7 +360,126 @@ public static class ModuleEndpoints
                 return Results.NotFound();
             }
         });
+
+        // ---- package tracking & IMAP email sync ----
+        var deliveries = app.MapGroup("/api/deliveries").RequireAuthorization().WithTags("deliveries");
+
+        deliveries.MapPost("/scan", async (bool? full, ImapPackageScanner scanner, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            try
+            {
+                var scanned = await scanner.ScanMailboxAsync(full ?? false, ct);
+                var userId = u.UserId();
+                var existing = await db.Packages.Where(p => p.UserId == userId).ToListAsync(ct);
+                var byTracking = existing.ToDictionary(p => p.TrackingNumber.ToUpperInvariant(), p => p);
+
+                var added = 0;
+                var updated = 0;
+
+                foreach (var s in scanned)
+                {
+                    var key = s.TrackingNumber.ToUpperInvariant();
+                    var newEntry = new PackageHistoryEntry(s.Status, s.LatestEvent, s.LatestEventTime, s.UpdatedAt);
+
+                    if (byTracking.TryGetValue(key, out var existingPkg))
+                    {
+                        var history = DeserializeHistory(existingPkg.HistoryJson);
+                        if (history.Any(h => h.text == newEntry.text && h.time == newEntry.time)) continue;
+
+                        history.Add(newEntry);
+                        existingPkg.Status = s.Status;
+                        existingPkg.Sender ??= s.Sender;
+                        existingPkg.ExpectedDelivery = ParseDateOnly(s.ExpectedDelivery) ?? existingPkg.ExpectedDelivery;
+                        existingPkg.LatestEvent = s.LatestEvent;
+                        existingPkg.LatestEventTime = s.LatestEventTime;
+                        existingPkg.HistoryJson = JsonSerializer.Serialize(history);
+                        existingPkg.UpdatedAt = DateTime.UtcNow;
+                        updated++;
+                    }
+                    else
+                    {
+                        var pkg = new Package
+                        {
+                            UserId = userId,
+                            Title = s.Title,
+                            Carrier = s.Carrier,
+                            TrackingNumber = s.TrackingNumber,
+                            Sender = s.Sender,
+                            Status = s.Status,
+                            ExpectedDelivery = ParseDateOnly(s.ExpectedDelivery),
+                            LatestEvent = s.LatestEvent,
+                            LatestEventTime = s.LatestEventTime,
+                            Source = "email_scan",
+                            UpdatedAt = DateTime.UtcNow,
+                            HistoryJson = JsonSerializer.Serialize(new[] { newEntry }),
+                        };
+                        db.Packages.Add(pkg);
+                        byTracking[key] = pkg;
+                        added++;
+                    }
+                }
+
+                await db.SaveChangesAsync(ct);
+                return Results.Ok(new { success = true, scanned = scanned.Count, added, updated });
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(
+                    title: "E-Mail-Postfach konnte nicht gescannt werden.",
+                    detail: ex.Message,
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        // Microsoft OAuth (XOAUTH2) sign-in, needed since Microsoft retired IMAP app passwords
+        // for Outlook.com/Live/Hotmail mailboxes. Device-code flow: the user opens the returned
+        // verification URL and enters the code, then GET /connect/status confirms completion.
+        deliveries.MapPost("/microsoft/connect/start", async (MicrosoftMailAuthService auth, CancellationToken ct) =>
+        {
+            try
+            {
+                var info = await auth.StartDeviceCodeSignInAsync(ct);
+                return Results.Ok(new { userCode = info.UserCode, verificationUrl = info.VerificationUrl, message = info.Message, expiresAtUtc = info.ExpiresAtUtc });
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(
+                    title: "Microsoft-Anmeldung konnte nicht gestartet werden.",
+                    detail: ex.Message,
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        });
+
+        deliveries.MapGet("/microsoft/connect/status", async (MicrosoftMailAuthService auth, CancellationToken ct) =>
+        {
+            var connected = await auth.TryGetAccessTokenAsync(ct) is not null;
+            var (status, error) = auth.GetPendingStatus();
+            return Results.Ok(new { connected, status = status.ToString().ToLowerInvariant(), error });
+        });
+
+        deliveries.MapPost("/microsoft/disconnect", async (MicrosoftMailAuthService auth) =>
+        {
+            await auth.DisconnectAsync();
+            return Results.NoContent();
+        });
     }
+
+    private record PackageHistoryEntry(string status, string text, string time, string at);
+
+    private static List<PackageHistoryEntry> DeserializeHistory(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new List<PackageHistoryEntry>();
+        try
+        {
+            return JsonSerializer.Deserialize<List<PackageHistoryEntry>>(json) ?? new List<PackageHistoryEntry>();
+        }
+        catch
+        {
+            return new List<PackageHistoryEntry>();
+        }
+    }
+
+    private static DateOnly? ParseDateOnly(string? iso) => DateOnly.TryParse(iso, out var d) ? d : null;
 
     private static AppointmentDto ToDto(Appointment a) => new(
         a.Id, a.UserId, a.Title, a.Category, a.StartsAt, a.EndsAt, a.Location,
