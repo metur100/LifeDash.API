@@ -131,6 +131,37 @@ resend a reminder that was already recorded as sent.
 The route only accepts `POST` and requires the secret header. Do not use the
 regular app JWT for this job.
 
+## Keep the Postfach scan running automatically
+
+Alongside the manual "Postfach scannen" buttons on the Deliveries and Family
+pages, a second cron job scans the same mailbox for Sendungen (packages) and
+Termine (appointments) on a schedule and writes into the same account. It
+reuses the `ReminderTrigger:ApiKey` secret set up above, under a different
+header, so no new secret needs to be generated.
+
+1. Set `MailTracking__OwnerUserId` to your account's numeric user id. Find it
+   by calling `GET /api/auth/me` while signed in (e.g. from the browser
+   console: `fetch("/api/auth/me", { headers: { Authorization: "Bearer " + token }}).then(r => r.json())`)
+   — the response's `userId` field is the value to use.
+2. In cron-job.org, create a new cron job with these settings:
+
+   | Field | Value |
+   |---|---|
+   | URL | `https://your-api-domain/api/jobs/mail-scan` |
+   | Request method | `POST` |
+   | Schedule | Every 6 hours (`0 */6 * * *`) |
+   | Request header | `X-MailScan-Trigger: <same secret as ReminderTrigger:ApiKey>` |
+   | Request body | Empty |
+
+3. Save the job, use **Run now** once, then inspect its execution history. A
+   successful call returns `{"status":"completed","packages":{...},"appointments":{...}}`.
+   A `401` means the header value does not match, and a `503` means either the
+   API key or `MailTracking:OwnerUserId` has not been configured yet.
+
+Termine detected this way are added with a `[mail-scan]` note so they're easy
+to tell apart from manually entered ones, and are never added twice for the
+same date, time and person.
+
 ## Security notes
 
 - Passwords use PBKDF2-SHA256 with 120,000 iterations and a per-user salt.

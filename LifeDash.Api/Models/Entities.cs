@@ -210,6 +210,10 @@ public class Booking
     [MaxLength(3)]   public string Currency { get; set; } = "EUR";
     public int? DocumentId { get; set; }
     [MaxLength(1000)]public string? Notes { get; set; }
+    // "outbound" (Hinreise/Abreise) | "return" (Rückreise/Rückfahrt) | null (not a directional leg,
+    // e.g. hotel/activity). Lets the UI tell an outbound flight apart from its return leg so the
+    // trip countdown and packing lists can be scoped per direction instead of just per trip.
+    [MaxLength(20)]  public string? Direction { get; set; }
     [JsonIgnore]
     public Trip? Trip { get; set; }
 }
@@ -222,8 +226,13 @@ public class PackingItem
     public int Quantity { get; set; } = 1;
     [MaxLength(60)]  public string? Category { get; set; }
     public bool IsPacked { get; set; }
+    // Null = general/shared trip item. Set = scoped to one leg (e.g. only needed for the return
+    // flight), so Hinreise and Rückreise can each have their own packing list.
+    public int? BookingId { get; set; }
     [JsonIgnore]
     public Trip? Trip { get; set; }
+    [JsonIgnore]
+    public Booking? Booking { get; set; }
 }
 
 public class Package : OwnedEntity

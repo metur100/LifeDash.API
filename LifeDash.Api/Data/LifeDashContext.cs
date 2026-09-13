@@ -85,6 +85,9 @@ public class LifeDashContext : DbContext
         b.Entity<Trip>()
             .HasMany(t => t.PackingItems).WithOne(x => x.Trip!)
             .HasForeignKey(x => x.TripId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<PackingItem>()
+            .HasOne(p => p.Booking).WithMany()
+            .HasForeignKey(p => p.BookingId).OnDelete(DeleteBehavior.SetNull);
     }
 
     public override int SaveChanges()

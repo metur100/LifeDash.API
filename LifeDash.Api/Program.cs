@@ -5,6 +5,7 @@ using LifeDash.Api.Models;
 using LifeDash.Api.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using System.Diagnostics;
 using System.Security.Claims;
@@ -31,6 +32,9 @@ builder.Services.Configure<ReminderEmailOptions>(builder.Configuration.GetSectio
 builder.Services.Configure<MailTrackingOptions>(builder.Configuration.GetSection("MailTracking"));
 builder.Services.AddSingleton<MicrosoftMailAuthService>();
 builder.Services.AddScoped<ImapPackageScanner>();
+builder.Services.AddScoped<PackageSyncService>();
+builder.Services.AddScoped<ImapAppointmentScanner>();
+builder.Services.AddScoped<AppointmentSyncService>();
 builder.Services.AddSingleton<ReminderEmailWorker>();
 builder.Services.AddHostedService(services => services.GetRequiredService<ReminderEmailWorker>());
 
@@ -100,6 +104,19 @@ using (var scope = app.Services.CreateScope())
             IF COL_LENGTH('dbo.Trips', 'StartPlace') IS NULL
                 ALTER TABLE dbo.Trips ADD StartPlace NVARCHAR(200) NULL;
             """);
+        await db.Database.ExecuteSqlRawAsync("""
+            IF COL_LENGTH('dbo.Bookings', 'Direction') IS NULL
+                ALTER TABLE dbo.Bookings ADD Direction NVARCHAR(20) NULL;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            IF COL_LENGTH('dbo.PackingItems', 'BookingId') IS NULL
+                ALTER TABLE dbo.PackingItems ADD BookingId INT NULL;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_PackingItems_Bookings')
+                ALTER TABLE dbo.PackingItems ADD CONSTRAINT FK_PackingItems_Bookings
+                    FOREIGN KEY (BookingId) REFERENCES dbo.Bookings(Id) ON DELETE SET NULL;
+            """);
 
         var seeded = db.Users.FirstOrDefault(u => u.PasswordHash == "SEED");
         if (seeded is not null)
@@ -152,6 +169,43 @@ app.MapPost("/api/jobs/reminders", async (HttpRequest request, IConfiguration co
         ReminderRunResult.AlreadyRunning => Results.Ok(new { status = "already-running" }),
         _ => Results.Problem("Reminder run failed. Check the application logs.", statusCode: StatusCodes.Status500InternalServerError)
     };
+}).ExcludeFromDescription();
+
+// Scans the mailbox for Sendungen and Termine on a schedule (cron-job.org calls this every 6
+// hours) so the existing manual "Postfach scannen" buttons keep working independently of this.
+// Reuses the same shared secret as /api/jobs/reminders under a distinct header, since mailbox
+// scanning is single-account and there's no logged-in user to attribute the results to on a
+// scheduled call — MailTracking:OwnerUserId says which account to write into instead.
+app.MapPost("/api/jobs/mail-scan", async (HttpRequest request, IConfiguration configuration,
+    IOptions<MailTrackingOptions> mailOptions, PackageSyncService packageSync, AppointmentSyncService appointmentSync,
+    LifeDashContext db, CancellationToken ct) =>
+{
+    var expectedKey = configuration["ReminderTrigger:ApiKey"];
+    var receivedKey = request.Headers["X-MailScan-Trigger"].ToString();
+    if (string.IsNullOrWhiteSpace(expectedKey))
+        return Results.Problem("ReminderTrigger:ApiKey is not configured.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    if (!string.Equals(receivedKey, expectedKey, StringComparison.Ordinal))
+        return Results.Unauthorized();
+
+    var ownerUserId = mailOptions.Value.OwnerUserId;
+    if (ownerUserId <= 0)
+        return Results.Problem("MailTracking:OwnerUserId is not configured.", statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    try
+    {
+        var packages = await packageSync.SyncAsync(ownerUserId, full: false, db, ct);
+        var appointments = await appointmentSync.SyncAsync(ownerUserId, db, ct);
+        return Results.Ok(new
+        {
+            status = "completed",
+            packages = new { packages.Scanned, packages.Added, packages.Updated },
+            appointments = new { appointments.Scanned, appointments.Added, appointments.SkippedDuplicate },
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(title: "Mail scan failed. Check the application logs.", detail: ex.Message, statusCode: StatusCodes.Status500InternalServerError);
+    }
 }).ExcludeFromDescription();
 
 app.MapGet("/api/logs", (HttpContext ctx, IAuditLogWriter audit, int? take) =>

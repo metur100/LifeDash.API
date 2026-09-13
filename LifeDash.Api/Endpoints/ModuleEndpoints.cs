@@ -1,5 +1,4 @@
 using System.Security.Claims;
-using System.Text.Json;
 using LifeDash.Api.Data;
 using LifeDash.Api.Dtos;
 using LifeDash.Api.Models;
@@ -100,6 +99,22 @@ public static class ModuleEndpoints
             db.Remove(a);
             await db.SaveChangesAsync(ct);
             return Results.NoContent();
+        });
+
+        appointments.MapPost("/scan-mailbox", async (AppointmentSyncService sync, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        {
+            try
+            {
+                var result = await sync.SyncAsync(u.UserId(), db, ct);
+                return Results.Ok(new { success = true, scanned = result.Scanned, added = result.Added, skippedDuplicate = result.SkippedDuplicate });
+            }
+            catch (Exception ex)
+            {
+                return Results.Problem(
+                    title: "E-Mail-Postfach konnte nicht nach Terminen durchsucht werden.",
+                    detail: ex.Message,
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
         });
 
         // ---- authority cases with nested checklist ----
@@ -262,6 +277,7 @@ public static class ModuleEndpoints
             b.Currency = input.Currency;
             b.DocumentId = input.DocumentId;
             b.Notes = input.Notes;
+            b.Direction = input.Direction;
             await db.SaveChangesAsync(ct);
             return Results.Ok(b);
         });
@@ -269,6 +285,8 @@ public static class ModuleEndpoints
         trips.MapPost("/{tripId:int}/packing", async (int tripId, PackingItem p, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
         {
             if (!await db.Trips.AnyAsync(t => t.Id == tripId && t.UserId == u.UserId(), ct)) return Results.NotFound();
+            if (p.BookingId is { } bid && !await db.Bookings.AnyAsync(x => x.Id == bid && x.TripId == tripId, ct))
+                return Results.BadRequest(new { error = "BookingId gehört nicht zu dieser Reise." });
             p.Id = 0; p.TripId = tripId;
             db.PackingItems.Add(p);
             await db.SaveChangesAsync(ct);
@@ -278,10 +296,13 @@ public static class ModuleEndpoints
         trips.MapPut("/{tripId:int}/packing/{id:int}", async (int tripId, int id, PackingItem input, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
         {
             if (!await db.Trips.AnyAsync(t => t.Id == tripId && t.UserId == u.UserId(), ct)) return Results.NotFound();
+            if (input.BookingId is { } bid && !await db.Bookings.AnyAsync(x => x.Id == bid && x.TripId == tripId, ct))
+                return Results.BadRequest(new { error = "BookingId gehört nicht zu dieser Reise." });
             var p = await db.PackingItems.FirstOrDefaultAsync(x => x.Id == id && x.TripId == tripId, ct);
             if (p is null) return Results.NotFound();
             p.Name = input.Name; p.Quantity = input.Quantity;
             p.Category = input.Category; p.IsPacked = input.IsPacked;
+            p.BookingId = input.BookingId;
             await db.SaveChangesAsync(ct);
             return Results.Ok(p);
         });
@@ -364,63 +385,12 @@ public static class ModuleEndpoints
         // ---- package tracking & IMAP email sync ----
         var deliveries = app.MapGroup("/api/deliveries").RequireAuthorization().WithTags("deliveries");
 
-        deliveries.MapPost("/scan", async (bool? full, ImapPackageScanner scanner, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
+        deliveries.MapPost("/scan", async (bool? full, PackageSyncService sync, LifeDashContext db, ClaimsPrincipal u, CancellationToken ct) =>
         {
             try
             {
-                var scanned = await scanner.ScanMailboxAsync(full ?? false, ct);
-                var userId = u.UserId();
-                var existing = await db.Packages.Where(p => p.UserId == userId).ToListAsync(ct);
-                var byTracking = existing.ToDictionary(p => p.TrackingNumber.ToUpperInvariant(), p => p);
-
-                var added = 0;
-                var updated = 0;
-
-                foreach (var s in scanned)
-                {
-                    var key = s.TrackingNumber.ToUpperInvariant();
-                    var newEntry = new PackageHistoryEntry(s.Status, s.LatestEvent, s.LatestEventTime, s.UpdatedAt);
-
-                    if (byTracking.TryGetValue(key, out var existingPkg))
-                    {
-                        var history = DeserializeHistory(existingPkg.HistoryJson);
-                        if (history.Any(h => h.text == newEntry.text && h.time == newEntry.time)) continue;
-
-                        history.Add(newEntry);
-                        existingPkg.Status = s.Status;
-                        existingPkg.Sender ??= s.Sender;
-                        existingPkg.ExpectedDelivery = ParseDateOnly(s.ExpectedDelivery) ?? existingPkg.ExpectedDelivery;
-                        existingPkg.LatestEvent = s.LatestEvent;
-                        existingPkg.LatestEventTime = s.LatestEventTime;
-                        existingPkg.HistoryJson = JsonSerializer.Serialize(history);
-                        existingPkg.UpdatedAt = DateTime.UtcNow;
-                        updated++;
-                    }
-                    else
-                    {
-                        var pkg = new Package
-                        {
-                            UserId = userId,
-                            Title = s.Title,
-                            Carrier = s.Carrier,
-                            TrackingNumber = s.TrackingNumber,
-                            Sender = s.Sender,
-                            Status = s.Status,
-                            ExpectedDelivery = ParseDateOnly(s.ExpectedDelivery),
-                            LatestEvent = s.LatestEvent,
-                            LatestEventTime = s.LatestEventTime,
-                            Source = "email_scan",
-                            UpdatedAt = DateTime.UtcNow,
-                            HistoryJson = JsonSerializer.Serialize(new[] { newEntry }),
-                        };
-                        db.Packages.Add(pkg);
-                        byTracking[key] = pkg;
-                        added++;
-                    }
-                }
-
-                await db.SaveChangesAsync(ct);
-                return Results.Ok(new { success = true, scanned = scanned.Count, added, updated });
+                var result = await sync.SyncAsync(u.UserId(), full ?? false, db, ct);
+                return Results.Ok(new { success = true, scanned = result.Scanned, added = result.Added, updated = result.Updated });
             }
             catch (Exception ex)
             {
@@ -464,22 +434,6 @@ public static class ModuleEndpoints
         });
     }
 
-    private record PackageHistoryEntry(string status, string text, string time, string at);
-
-    private static List<PackageHistoryEntry> DeserializeHistory(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return new List<PackageHistoryEntry>();
-        try
-        {
-            return JsonSerializer.Deserialize<List<PackageHistoryEntry>>(json) ?? new List<PackageHistoryEntry>();
-        }
-        catch
-        {
-            return new List<PackageHistoryEntry>();
-        }
-    }
-
-    private static DateOnly? ParseDateOnly(string? iso) => DateOnly.TryParse(iso, out var d) ? d : null;
 
     private static AppointmentDto ToDto(Appointment a) => new(
         a.Id, a.UserId, a.Title, a.Category, a.StartsAt, a.EndsAt, a.Location,
