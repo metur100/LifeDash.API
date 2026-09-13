@@ -161,15 +161,16 @@ public class ImapAppointmentScanner
         return (hour, minute);
     }
 
+    // Matches the full name, or just the given (first) name - deliberately NOT any individual
+    // token, since matching on a shared family surname alone (e.g. "Familie Turkes") would
+    // otherwise match every family member with that surname instead of just the one addressed.
     private static bool ContainsName(string content, string fullName)
     {
-        foreach (var token in fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (token.Length < 2) continue;
-            if (Regex.IsMatch(content, $@"\b{Regex.Escape(token)}\b", RegexOptions.IgnoreCase))
-                return true;
-        }
-        return false;
+        if (Regex.IsMatch(content, $@"\b{Regex.Escape(fullName)}\b", RegexOptions.IgnoreCase))
+            return true;
+
+        var firstName = fullName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        return firstName is { Length: >= 2 } && Regex.IsMatch(content, $@"\b{Regex.Escape(firstName)}\b", RegexOptions.IgnoreCase);
     }
 
     private static DateOnly? ExtractDate(string content)
