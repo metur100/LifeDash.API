@@ -7,7 +7,7 @@ namespace LifeDash.Api.Services;
 public record AppointmentSyncResult(int Scanned, int Added, int SkippedDuplicate);
 
 // Shared by the authenticated manual trigger (POST /api/appointments/scan-mailbox) and the
-// anonymous cron endpoint (POST /api/jobs/mail-scan).
+// anonymous cron endpoint (POST /api/jobs/mail-scan)
 public class AppointmentSyncService
 {
     private readonly ImapAppointmentScanner _scanner;
