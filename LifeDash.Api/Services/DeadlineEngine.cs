@@ -165,8 +165,13 @@ public class DeadlineEngine(LifeDashContext db)
             var date = DateOnly.FromDateTime(a.StartsAt);
             var days = date.DayNumber - today.DayNumber;
             if (days < -1) continue;
+            // a.ReminderDays has no UI to edit it and is always created as 3 (see
+            // Family.tsx), which the Math.Max(reminderDays, 14) floor in Grade()
+            // always collapses to the same narrow 8-14 day window - so almost no
+            // appointment ever lands in it and "bald" never appears. Use a fixed,
+            // wider window instead, matching how subscriptions/home items grade.
             alerts.Add(new Alert(
-                $"appt-{a.Id}", MapModule(a.Category), "appointment", Grade(days, a.ReminderDays),
+                $"appt-{a.Id}", MapModule(a.Category), "appointment", Grade(days, 21),
                 a.Title,
                 $"{a.StartsAt:dd.MM.yyyy HH:mm}{(string.IsNullOrWhiteSpace(a.Location) ? "" : $", {a.Location}")} — {Countdown(days)}.",
                 date, days, "Termin öffnen", "/family", "Appointment", a.Id));
