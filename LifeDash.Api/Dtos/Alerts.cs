@@ -11,7 +11,7 @@ public record Alert(
     string Title,
     string Message,       // human sentence, already formatted
     DateOnly? DueOn,
-    int? DaysLeft,        // negative = overdue
+    int? DaysLeft,        
     string? ActionLabel,
     string? ActionPath,   // frontend route
     string? RelatedType,
