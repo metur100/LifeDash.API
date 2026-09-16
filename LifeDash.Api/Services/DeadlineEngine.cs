@@ -10,11 +10,17 @@ namespace LifeDash.Api.Services;
 /// </summary>
 public class DeadlineEngine(LifeDashContext db)
 {
-    public static AlertSeverity Grade(int daysLeft, int reminderDays)
+    // Fixed thresholds shared by every module: overdue is in the past, dringend
+    // is the next 7 days, bald is days 8-15, everything further out (but still
+    // inside the queried horizon) is a neutral hinweis. Deliberately no longer
+    // takes a per-entity reminderDays - that made the bald window collapse to
+    // whatever narrow slice a given entity's (often unconfigurable) reminder
+    // setting happened to leave, so it barely ever matched real dates.
+    public static AlertSeverity Grade(int daysLeft)
     {
         if (daysLeft < 0) return AlertSeverity.Overdue;
         if (daysLeft <= 7) return AlertSeverity.Urgent;
-        if (daysLeft <= Math.Max(reminderDays, 14)) return AlertSeverity.Soon;
+        if (daysLeft <= 15) return AlertSeverity.Soon;
         return AlertSeverity.Info;
     }
 
@@ -47,7 +53,7 @@ public class DeadlineEngine(LifeDashContext db)
             var days = d.ExpiresOn!.Value.DayNumber - today.DayNumber;
             alerts.Add(new Alert(
                 $"doc-{d.Id}", MapModule(d.Category), "expiry",
-                Grade(days, d.ReminderDays),
+                Grade(days),
                 d.Title,
                 $"{d.DocumentType ?? "Dokument"} läuft ab — {Countdown(days)}.",
                 d.ExpiresOn, days, "Dokument öffnen", $"/documents/{d.Id}", "Document", d.Id));
@@ -65,7 +71,7 @@ public class DeadlineEngine(LifeDashContext db)
             {
                 var days = dl.DayNumber - today.DayNumber;
                 alerts.Add(new Alert(
-                    $"case-{c.Id}", "authority", "expiry", Grade(days, c.ReminderDays),
+                    $"case-{c.Id}", "authority", "expiry", Grade(days),
                     c.Title,
                     $"Frist bei {c.Authority ?? "der Behörde"} — {Countdown(days)}.",
                     dl, days, "Vorgang öffnen", $"/authorities/{c.Id}", "AuthorityCase", c.Id));
@@ -75,7 +81,7 @@ public class DeadlineEngine(LifeDashContext db)
             {
                 var days = na.DayNumber - today.DayNumber;
                 alerts.Add(new Alert(
-                    $"case-next-{c.Id}", "authority", "task", Grade(days, 14),
+                    $"case-next-{c.Id}", "authority", "task", Grade(days),
                     c.Title,
                     $"Nächster Schritt fällig — {Countdown(days)}.",
                     na, days, "Vorgang öffnen", $"/authorities/{c.Id}", "AuthorityCase", c.Id));
@@ -85,7 +91,7 @@ public class DeadlineEngine(LifeDashContext db)
             foreach (var r in c.RequiredDocuments.Where(r => r.IsMandatory && r.DocumentId == null))
             {
                 var days = r.DueOn is { } due ? due.DayNumber - today.DayNumber : (int?)null;
-                var severity = days is { } dd ? Grade(dd, 14) : AlertSeverity.Soon;
+                var severity = days is { } dd ? Grade(dd) : AlertSeverity.Soon;
                 var tail = days is { } d2 ? $" — {Countdown(d2)}" : "";
                 alerts.Add(new Alert(
                     $"reqdoc-{r.Id}", "authority", "missing-document", severity,
@@ -104,7 +110,7 @@ public class DeadlineEngine(LifeDashContext db)
         {
             var days = p.DueOn.DayNumber - today.DayNumber;
             alerts.Add(new Alert(
-                $"pay-{p.Id}", "finance", "payment", Grade(days, 10),
+                $"pay-{p.Id}", "finance", "payment", Grade(days),
                 p.Title,
                 $"{p.Amount:0.00} {p.Currency} — {Countdown(days)}.",
                 p.DueOn, days, "Als bezahlt markieren", "/finance", "Payment", p.Id));
@@ -132,7 +138,7 @@ public class DeadlineEngine(LifeDashContext db)
                     ? " — danach verlängert sich der Vertrag automatisch."
                     : ".";
                 alerts.Add(new Alert(
-                    $"sub-cancel-{s.Id}", "finance", "renewal", Grade(days, 21),
+                    $"sub-cancel-{s.Id}", "finance", "renewal", Grade(days),
                     s.Name,
                     $"Kündigungsfrist endet {Countdown(days)}{tail}",
                     cancel, days, "Vertrag prüfen", "/contracts", "Subscription", s.Id));
@@ -148,7 +154,7 @@ public class DeadlineEngine(LifeDashContext db)
         {
             var days = h.WarrantyUntil!.Value.DayNumber - today.DayNumber;
             alerts.Add(new Alert(
-                $"warranty-{h.Id}", "home", "warranty", Grade(days, 30),
+                $"warranty-{h.Id}", "home", "warranty", Grade(days),
                 h.Title,
                 $"Garantie endet {Countdown(days)}. Defekte jetzt noch kostenlos reklamieren.",
                 h.WarrantyUntil, days, "Im Haushalt öffnen", "/home-items", "HomeItem", h.Id));
@@ -165,13 +171,8 @@ public class DeadlineEngine(LifeDashContext db)
             var date = DateOnly.FromDateTime(a.StartsAt);
             var days = date.DayNumber - today.DayNumber;
             if (days < -1) continue;
-            // a.ReminderDays has no UI to edit it and is always created as 3 (see
-            // Family.tsx), which the Math.Max(reminderDays, 14) floor in Grade()
-            // always collapses to the same narrow 8-14 day window - so almost no
-            // appointment ever lands in it and "bald" never appears. Use a fixed,
-            // wider window instead, matching how subscriptions/home items grade.
             alerts.Add(new Alert(
-                $"appt-{a.Id}", MapModule(a.Category), "appointment", Grade(days, 21),
+                $"appt-{a.Id}", MapModule(a.Category), "appointment", Grade(days),
                 a.Title,
                 $"{a.StartsAt:dd.MM.yyyy HH:mm}{(string.IsNullOrWhiteSpace(a.Location) ? "" : $", {a.Location}")} — {Countdown(days)}.",
                 date, days, "Termin öffnen", "/family", "Appointment", a.Id));
@@ -202,7 +203,7 @@ public class DeadlineEngine(LifeDashContext db)
             var days = t.DueOn!.Value.DayNumber - today.DayNumber;
             alerts.Add(new Alert(
                 $"task-{t.Id}", t.Module, "task",
-                Grade(days, t.Priority == "high" ? 21 : 7),
+                Grade(days),
                 t.Title, $"Aufgabe {Countdown(days)}.",
                 t.DueOn, days, "Erledigen", "/tasks", "TaskItem", t.Id));
         }
