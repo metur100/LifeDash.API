@@ -188,7 +188,7 @@ public class DeadlineEngine(LifeDashContext db)
             if (next is null || next > horizon) continue;
             var days = next.Value.DayNumber - today.DayNumber;
             alerts.Add(new Alert(
-                $"date-{i.Id}", "family", "birthday", days <= 7 ? AlertSeverity.Soon : AlertSeverity.Info,
+                $"date-{i.Id}", "family", "birthday", Grade(days),
                 i.Title, $"{next:dd.MM.yyyy} — {Countdown(days)}.",
                 next, days, "Im Familienbereich ansehen", "/family", "ImportantDate", i.Id));
         }
@@ -221,7 +221,7 @@ public class DeadlineEngine(LifeDashContext db)
             var unpacked = nextTrip.PackingItems.Count(p => !p.IsPacked);
             alerts.Add(new Alert(
                 $"trip-{nextTrip.Id}", "travel", "trip",
-                days <= 14 ? AlertSeverity.Soon : AlertSeverity.Info,
+                Grade(days),
                 nextTrip.Title,
                 $"Abreise {Countdown(days)}" + (unpacked > 0 ? $", {unpacked} Positionen noch nicht gepackt." : "."),
                 nextTrip.StartsOn, days, "Reise öffnen", $"/travel/{nextTrip.Id}", "Trip", nextTrip.Id));
