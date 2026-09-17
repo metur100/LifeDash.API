@@ -45,6 +45,52 @@ public class ReminderEmailWorker : BackgroundService
 
     private static readonly string[] ClosedAuthorityStatuses = { "closed", "approved", "rejected" };
 
+    // These mirror the (English-valued) select options the UI shows as German
+    // labels - e.g. Family.tsx's APPOINTMENT_CATEGORIES. The stored value is
+    // the English code; reminder emails need the German label, not the raw code.
+    private static readonly Dictionary<string, string> AppointmentCategoryLabels = new()
+    {
+        ["family"] = "Familie", ["birthday"] = "Geburtstag", ["anniversary"] = "Jahrestag",
+        ["authority"] = "Behörde", ["health"] = "Gesundheit", ["school"] = "Schule",
+        ["work"] = "Arbeit", ["finance"] = "Finanzen", ["travel"] = "Reise",
+        ["home"] = "Haushalt", ["other"] = "Sonstiges",
+    };
+
+    private static readonly Dictionary<string, string> CadenceLabels = new()
+    {
+        ["monthly"] = "monatlich", ["quarterly"] = "quartalsweise",
+        ["yearly"] = "jährlich", ["onetime"] = "einmalig",
+    };
+
+    private static readonly Dictionary<string, string> TaskPriorityLabels = new()
+    {
+        ["low"] = "niedrig", ["normal"] = "normal", ["high"] = "hoch",
+    };
+
+    private static readonly Dictionary<string, string> TaskModuleLabels = new()
+    {
+        ["general"] = "Allgemein", ["family"] = "Familie", ["authority"] = "Behörden",
+        ["finance"] = "Finanzen", ["home"] = "Allgemein", ["travel"] = "Reisen",
+    };
+
+    private static readonly Dictionary<string, string> AuthorityStatusLabels = new()
+    {
+        ["open"] = "Offen", ["waiting"] = "Wartend", ["submitted"] = "Eingereicht",
+        ["approved"] = "Bewilligt", ["rejected"] = "Abgelehnt", ["closed"] = "Abgeschlossen",
+    };
+
+    private static readonly Dictionary<string, string> CostCategoryLabels = new()
+    {
+        ["miete"] = "Miete", ["nebenkosten"] = "Nebenkosten", ["strom"] = "Strom",
+        ["dsl"] = "DSL/Internet", ["abo"] = "Abo", ["vertrag"] = "Vertrag",
+        ["versicherung"] = "Versicherung", ["steuer"] = "Steuer", ["auto"] = "Auto",
+        ["gesundheit"] = "Gesundheit", ["lebensmittel"] = "Lebensmittel",
+        ["online-kaeufe"] = "Online-Käufe", ["sonstiges"] = "Sonstiges",
+    };
+
+    private static string Label(Dictionary<string, string> map, string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "" : map.GetValueOrDefault(value, value);
+
     public ReminderEmailWorker(
         IServiceScopeFactory scopeFactory,
         IOptions<ReminderEmailOptions> options,
@@ -146,7 +192,7 @@ public class ReminderEmailWorker : BackgroundService
             {
                 ("Datum & Uhrzeit", a.StartsAt.ToString("dd.MM.yyyy HH:mm")),
                 ("Ort", a.Location ?? ""),
-                ("Kategorie", a.Category),
+                ("Kategorie", Label(AppointmentCategoryLabels, a.Category)),
                 ("Teilnehmer", attendees.Count > 0 ? string.Join(", ", attendees) : ""),
             };
 
@@ -248,8 +294,8 @@ public class ReminderEmailWorker : BackgroundService
                 new[]
                 {
                     ("Fällig am", t.DueOn!.Value.ToString("dd.MM.yyyy")),
-                    ("Priorität", t.Priority),
-                    ("Bereich", t.Module),
+                    ("Priorität", Label(TaskPriorityLabels, t.Priority)),
+                    ("Bereich", Label(TaskModuleLabels, t.Module)),
                 },
                 AppUrl("/tasks"), "Aufgabe ansehen",
                 "LifeDash erinnert dich automatisch am Fälligkeitstag jeder Aufgabe.");
@@ -272,7 +318,7 @@ public class ReminderEmailWorker : BackgroundService
             {
                 ("Betrag", $"{p.Amount:0.00} {p.Currency}"),
                 ("Fällig am", p.DueOn.ToString("dd.MM.yyyy")),
-                ("Kategorie", p.Category ?? ""),
+                ("Kategorie", Label(CostCategoryLabels, p.Category)),
             };
 
             if (p.DueOn == tomorrow)
@@ -332,8 +378,8 @@ public class ReminderEmailWorker : BackgroundService
             {
                 ("Betrag", $"{c.Amount:0.00} {c.Currency}"),
                 ("Fällig am", nextDue.ToString("dd.MM.yyyy")),
-                ("Turnus", c.Cadence),
-                ("Kategorie", c.Category ?? ""),
+                ("Turnus", Label(CadenceLabels, c.Cadence)),
+                ("Kategorie", Label(CostCategoryLabels, c.Category)),
             };
 
             if (nextDue == tomorrow)
@@ -404,7 +450,7 @@ public class ReminderEmailWorker : BackgroundService
             {
                 ("Betrag", $"{i.Amount:0.00} {i.Currency}"),
                 ("Erwartet am", next.Value.ToString("dd.MM.yyyy")),
-                ("Turnus", i.Cadence),
+                ("Turnus", Label(CadenceLabels, i.Cadence)),
             };
 
             if (next == tomorrow)
@@ -488,7 +534,7 @@ public class ReminderEmailWorker : BackgroundService
                 ("Frist", c.DeadlineOn!.Value.ToString("dd.MM.yyyy")),
                 ("Behörde", c.Authority ?? ""),
                 ("Aktenzeichen", c.ReferenceNo ?? ""),
-                ("Status", c.Status),
+                ("Status", Label(AuthorityStatusLabels, c.Status)),
                 ("Person", person),
             };
 
