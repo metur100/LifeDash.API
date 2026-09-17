@@ -11,7 +11,7 @@ namespace LifeDash.Api.Services;
 public class DeadlineEngine(LifeDashContext db)
 {
     // Fixed thresholds shared by every module: overdue is in the past, dringend
-    // is the next 7 days, bald is days 8-15, everything further out (but still
+    // is the next 7 days, bald is days 8-20, everything further out (but still
     // inside the queried horizon) is a neutral hinweis. Deliberately no longer
     // takes a per-entity reminderDays - that made the bald window collapse to
     // whatever narrow slice a given entity's (often unconfigurable) reminder
@@ -20,7 +20,7 @@ public class DeadlineEngine(LifeDashContext db)
     {
         if (daysLeft < 0) return AlertSeverity.Overdue;
         if (daysLeft <= 7) return AlertSeverity.Urgent;
-        if (daysLeft <= 15) return AlertSeverity.Soon;
+        if (daysLeft <= 20) return AlertSeverity.Soon;
         return AlertSeverity.Info;
     }
 
