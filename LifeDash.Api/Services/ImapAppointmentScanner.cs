@@ -110,15 +110,28 @@ public class ImapAppointmentScanner
     // Requires both a Termin-related keyword AND a parseable date+time before treating a message as
     // an appointment — the same conservative two-signal approach ImapPackageScanner uses for
     // tracking numbers, to keep newsletters/unrelated mail from turning into junk appointments.
+    // Keywords cover German, English and Bosnian, since the mailbox receives mail in all three.
     private static readonly Regex AppointmentKeywordRegex = new(
-        @"\b(termin(?:bestätigung|vereinbarung)?|vorsorgetermin|arzttermin|zahnarzttermin|elterngespräch|elternabend|einladung|wir bestätigen|ihr termin|vereinbarter termin)\b",
+        @"\b(" +
+        // German
+        @"termin(?:bestätigung|vereinbarung)?|vorsorgetermin|arzttermin|zahnarzttermin|elterngespräch|elternabend|einladung|wir bestätigen|ihr termin|vereinbarter termin|" +
+        // English
+        @"appointment(?:\s+confirmation)?|confirmed appointment|we confirm|your appointment|scheduled|meeting|invitation|booking confirm(?:ation|ed)?|reservation confirmed|doctor'?s appointment|dentist appointment|parent(?:-|\s)teacher meeting|" +
+        // Bosnian
+        @"sastanak|zakazan(?:i|o)?\s*termin|potvrda termina|poziv na (?:sastanak|pregled)|ljekarski pregled|roditeljski sastanak" +
+        @")\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    // "14:30 Uhr" / "14.30 Uhr" — the reliable signal, checked first.
-    private static readonly Regex TimeWithUhrRegex = new(
-        @"\b([01]?[0-9]|2[0-3])[:.]([0-5][0-9])\s*uhr\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // "14:30 Uhr" / "14.30 Uhr" (German) / "14:30 sati" or "14:30h" (Bosnian) — the reliable
+    // signal, checked first.
+    private static readonly Regex TimeWithSuffixRegex = new(
+        @"\b([01]?[0-9]|2[0-3])[:.]([0-5][0-9])\s*(uhr|sati|h)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    // Bare "14:30" — colon only (not dot), since a dot separator collides with DE date formatting
+    // "2:30 PM" / "2.30pm" (English 12-hour clock).
+    private static readonly Regex TimeAmPmRegex = new(
+        @"\b(0?[1-9]|1[0-2])[:.]([0-5][0-9])\s*(am|pm)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Bare "14:30" — colon only (not dot), since a dot separator collides with DE/BA date formatting
     // (e.g. "12.09.2026") and would misread part of a date as a time.
     private static readonly Regex TimeColonRegex = new(
         @"\b([01]?[0-9]|2[0-3]):([0-5][0-9])\b", RegexOptions.Compiled);
@@ -152,13 +165,26 @@ public class ImapAppointmentScanner
 
     private static (int hour, int minute)? ExtractTime(string content)
     {
-        var m = TimeWithUhrRegex.Match(content);
-        if (!m.Success) m = TimeColonRegex.Match(content);
+        var m = TimeWithSuffixRegex.Match(content);
+        if (m.Success)
+        {
+            return (int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value));
+        }
+
+        m = TimeAmPmRegex.Match(content);
+        if (m.Success)
+        {
+            var hour = int.Parse(m.Groups[1].Value);
+            var isPm = string.Equals(m.Groups[3].Value, "pm", StringComparison.OrdinalIgnoreCase);
+            if (isPm && hour != 12) hour += 12;
+            if (!isPm && hour == 12) hour = 0;
+            return (hour, int.Parse(m.Groups[2].Value));
+        }
+
+        m = TimeColonRegex.Match(content);
         if (!m.Success) return null;
 
-        var hour = int.Parse(m.Groups[1].Value);
-        var minute = int.Parse(m.Groups[2].Value);
-        return (hour, minute);
+        return (int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value));
     }
 
     // Matches the full name, or just the given (first) name - deliberately NOT any individual
@@ -184,6 +210,7 @@ public class ImapAppointmentScanner
             try { return new DateOnly(y, m, d); } catch { return null; }
         }
 
+        // German and Bosnian both write dates as DD.MM.YYYY.
         var deMatch = Regex.Match(content, @"\b([0-3]?[0-9])\.([0-1]?[0-9])\.(202[4-9])\b");
         if (deMatch.Success
             && int.TryParse(deMatch.Groups[1].Value, out var day)
@@ -191,6 +218,16 @@ public class ImapAppointmentScanner
             && int.TryParse(deMatch.Groups[3].Value, out var year))
         {
             try { return new DateOnly(year, month, day); } catch { return null; }
+        }
+
+        // English writes dates as MM/DD/YYYY.
+        var enMatch = Regex.Match(content, @"\b(0?[1-9]|1[0-2])/([0-3]?[0-9])/(202[4-9])\b");
+        if (enMatch.Success
+            && int.TryParse(enMatch.Groups[1].Value, out var enMonth)
+            && int.TryParse(enMatch.Groups[2].Value, out var enDay)
+            && int.TryParse(enMatch.Groups[3].Value, out var enYear))
+        {
+            try { return new DateOnly(enYear, enMonth, enDay); } catch { return null; }
         }
 
         return null;

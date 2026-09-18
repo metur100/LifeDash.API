@@ -238,7 +238,7 @@ public class PackingItem
 public class Package : OwnedEntity
 {
     [MaxLength(200)] public string Title { get; set; } = "";
-    [MaxLength(20)]  public string Carrier { get; set; } = "dhl"; // dhl|dpd|hermes|gls|other
+    [MaxLength(20)]  public string Carrier { get; set; } = "dhl"; // dhl|dpd|hermes|gls|deutschepost|other
     [MaxLength(120)] public string TrackingNumber { get; set; } = "";
     [MaxLength(160)] public string? Sender { get; set; }
     [MaxLength(30)]  public string Status { get; set; } = "in_transit"; // announced|in_transit|out_for_delivery|delivered|exception

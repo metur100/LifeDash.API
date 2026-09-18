@@ -202,6 +202,13 @@ public class ImapPackageScanner
 
     private static string DetectCarrier(string from, string subject, string content)
     {
+        // Deutsche Post letter mail ("Brief"/"Einschreiben") — checked before the DHL/Deutsche
+        // Post Paket check below, since deutschepost.de also sends DHL parcel notifications.
+        var mentionsBrief = Regex.IsMatch(subject, @"\b(brief|einschreiben)\b", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(content, @"\b(brief|einschreiben)\b", RegexOptions.IgnoreCase);
+        var mentionsPaket = Regex.IsMatch(content, @"\bpaket\b", RegexOptions.IgnoreCase);
+        if (mentionsBrief && !mentionsPaket) return "deutschepost";
+
         if (Regex.IsMatch(from, @"@(dhl|deutschepost|paket)\.", RegexOptions.IgnoreCase) ||
             Regex.IsMatch(subject, @"\bdhl\b", RegexOptions.IgnoreCase))
             return "dhl";
@@ -261,6 +268,15 @@ public class ImapPackageScanner
                 if (match.Success) return match.Groups[1].Value.Trim();
                 match = Regex.Match(content, @"\b(GLS[0-9A-Z]{8,10})\b", RegexOptions.IgnoreCase);
                 if (match.Success) return match.Groups[1].Value.Trim();
+                break;
+
+            case "deutschepost":
+                // Einschreiben/registered-letter reference numbers follow the UPU S10 format
+                // (2 letters + 9 digits + 2 letters, e.g. "RR123456785DE").
+                match = Regex.Match(content, @"(?:sendungsnummer|einschreiben-?nr\.?|referenznummer)[:\s#]*([A-Z]{2}[0-9]{9}[A-Z]{2})", RegexOptions.IgnoreCase);
+                if (match.Success) return match.Groups[1].Value.Trim().ToUpperInvariant();
+                match = Regex.Match(content, @"\b([A-Z]{2}[0-9]{9}[A-Z]{2})\b", RegexOptions.IgnoreCase);
+                if (match.Success) return match.Groups[1].Value.Trim().ToUpperInvariant();
                 break;
         }
 
