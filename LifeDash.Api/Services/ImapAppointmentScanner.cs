@@ -114,44 +114,120 @@ public class ImapAppointmentScanner
     private static readonly Regex AppointmentKeywordRegex = new(
         @"\b(" +
         // German
-        @"termin(?:bestätigung|vereinbarung)?|vorsorgetermin|arzttermin|zahnarzttermin|elterngespräch|elternabend|einladung|wir bestätigen|ihr termin|vereinbarter termin|" +
+        @"termin(?:bestätigung|vereinbarung|erinnerung)?|vorsorgetermin|arzttermin|zahnarzttermin|impftermin|prüfungstermin|beratungstermin|besichtigungstermin|liefertermin|abholtermin|elterngespräch|elternabend|einladung|wir bestätigen|ihr termin|vereinbarter termin|sprechstunde|videosprechstunde|videokonferenz|findet statt am|bestätigt für|" +
         // English
-        @"appointment(?:\s+confirmation)?|confirmed appointment|we confirm|your appointment|scheduled|meeting|invitation|booking confirm(?:ation|ed)?|reservation confirmed|doctor'?s appointment|dentist appointment|parent(?:-|\s)teacher meeting|" +
-        // Bosnian
-        @"sastanak|zakazan(?:i|o)?\s*termin|potvrda termina|poziv na (?:sastanak|pregled)|ljekarski pregled|roditeljski sastanak" +
+        @"appointment(?:\s*:|\s+confirmation)?|confirmed appointment|we confirm|your appointment|scheduled|meeting|invitation|booking confirm(?:ation|ed)?|reservation confirmed|doctor'?s appointment|dentist appointment|parent(?:-|\s)teacher meeting|exam(?:ination)?(?:\s+confirmation)?|test date|interview scheduled|video call|webinar|consultation|confirmed for|save the date|" +
+        // Bosnian / Serbian / Croatian
+        @"sastanak|zakazan(?:i|o)?\s*termin|potvrda termina|poziv na (?:sastanak|pregled)|ljekarski pregled|roditeljski sastanak|ispit|zakazano za|potvrđeno za|konsultacija|video poziv" +
         @")\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    // "14:30 Uhr" / "14.30 Uhr" (German) / "14:30 sati" or "14:30h" (Bosnian) — the reliable
-    // signal, checked first.
-    private static readonly Regex TimeWithSuffixRegex = new(
-        @"\b([01]?[0-9]|2[0-3])[:.]([0-5][0-9])\s*(uhr|sati|h)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Month names/abbreviations in English, German and Bosnian, so dates spelled out in words
+    // (e.g. "September 30, 2026" or "30. septembar 2026.") can be recognized, not just numeric
+    // DD.MM.YYYY / MM/DD/YYYY dates.
+    private static readonly Dictionary<string, int> MonthNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // English
+        ["january"] = 1, ["jan"] = 1,
+        ["february"] = 2, ["feb"] = 2,
+        ["march"] = 3, ["mar"] = 3,
+        ["april"] = 4, ["apr"] = 4, ["aprila"] = 4,
+        ["may"] = 5,
+        ["june"] = 6, ["jun"] = 6,
+        ["july"] = 7, ["jul"] = 7,
+        ["august"] = 8, ["aug"] = 8,
+        ["september"] = 9, ["sept"] = 9, ["sep"] = 9,
+        ["october"] = 10, ["oct"] = 10,
+        ["november"] = 11, ["nov"] = 11,
+        ["december"] = 12, ["dec"] = 12,
+        // German
+        ["januar"] = 1, ["januara"] = 1,
+        ["februar"] = 2, ["februara"] = 2,
+        ["märz"] = 3, ["marz"] = 3, ["mrz"] = 3, ["mart"] = 3, ["marta"] = 3,
+        ["mai"] = 5, ["maj"] = 5, ["maja"] = 5,
+        ["juni"] = 6, ["juna"] = 6,
+        ["juli"] = 7, ["jula"] = 7,
+        ["oktober"] = 10, ["okt"] = 10, ["oktobar"] = 10, ["oktobra"] = 10,
+        ["dezember"] = 12, ["dez"] = 12, ["decembar"] = 12, ["decembra"] = 12,
+        // Bosnian / Serbian / Croatian
+        ["avgust"] = 8, ["avgusta"] = 8,
+        ["septembar"] = 9, ["septembra"] = 9,
+        ["novembar"] = 11, ["novembra"] = 11,
+    };
 
-    // "2:30 PM" / "2.30pm" (English 12-hour clock).
+    private static readonly string MonthNamesPattern = string.Join("|", MonthNames.Keys.Select(Regex.Escape));
+
+    // "September 30, 2026" / "Sep 30 2026".
+    private static readonly Regex MonthDayYearRegex = new(
+        $@"\b(?<month>{MonthNamesPattern})\.?\s+(?<day>[0-3]?[0-9])(?:st|nd|rd|th)?,?\s+(?<year>202[4-9])\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // "30. September 2026" (German) / "30. septembar 2026." (Bosnian).
+    private static readonly Regex DayMonthYearRegex = new(
+        $@"\b(?<day>[0-3]?[0-9])\.?\s+(?<month>{MonthNamesPattern})\.?,?\s+(?<year>202[4-9])\.?\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // "14:30 Uhr" / "14.30 Uhr" (German) / "14:30 sati" or "14:30h" (Bosnian) — the reliable
+    // signal, checked first. Seconds (":00") are optional and ignored.
+    private static readonly Regex TimeWithSuffixRegex = new(
+        @"\b([01]?[0-9]|2[0-3])[:.]([0-5][0-9])(?::[0-5][0-9])?\s*(uhr|sati|h)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // "2:30 PM" / "2.30pm" / "5:30:00 PM" (English 12-hour clock, seconds optional).
     private static readonly Regex TimeAmPmRegex = new(
-        @"\b(0?[1-9]|1[0-2])[:.]([0-5][0-9])\s*(am|pm)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"\b(0?[1-9]|1[0-2])[:.]([0-5][0-9])(?::[0-5][0-9])?\s*(am|pm)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // Bare "14:30" — colon only (not dot), since a dot separator collides with DE/BA date formatting
-    // (e.g. "12.09.2026") and would misread part of a date as a time.
+    // (e.g. "12.09.2026") and would misread part of a date as a time. Seconds are optional.
     private static readonly Regex TimeColonRegex = new(
-        @"\b([01]?[0-9]|2[0-3]):([0-5][0-9])\b", RegexOptions.Compiled);
+        @"\b([01]?[0-9]|2[0-3]):([0-5][0-9])(?::[0-5][0-9])?\b", RegexOptions.Compiled);
 
     private ScannedAppointmentDto? ParseAppointmentFromMessage(MimeMessage message, List<string> knownNames)
     {
         var subject = message.Subject ?? "";
         var textBody = message.TextBody ?? "";
-        var htmlBody = message.HtmlBody ?? "";
+        // Strip tags/decode entities so wording split across HTML elements (e.g. a table cell)
+        // still reads as plain text for the keyword/date/time regexes below.
+        var htmlBody = string.IsNullOrEmpty(message.HtmlBody)
+            ? ""
+            : System.Net.WebUtility.HtmlDecode(Regex.Replace(message.HtmlBody, "<[^>]+>", " "));
         var combined = $"{subject}\n{textBody}\n{htmlBody}";
 
-        if (!AppointmentKeywordRegex.IsMatch(combined)) return null;
+        var keywordMatches = AppointmentKeywordRegex.Matches(combined);
+        if (keywordMatches.Count == 0) return null;
 
-        var dateOnly = ExtractDate(combined);
-        if (dateOnly is null) return null;
+        // A message can contain several dates (e.g. an invoice's "Transaction Date" alongside an
+        // "Appointment" line). Prefer the date+time found near an appointment keyword over the
+        // first date/time anywhere in the message, so unrelated dates aren't picked by accident.
+        (DateOnly date, (int hour, int minute) time)? best = null;
+        foreach (Match keywordMatch in keywordMatches)
+        {
+            // Forward-only: a date/time preceding the keyword usually belongs to something else
+            // entirely (e.g. an invoice's "Order date" ahead of a later "Appointment:" line), while
+            // "<keyword>: <date> at <time>" / "<keyword> am <date> um <time>" is the common phrasing.
+            var windowEnd = Math.Min(combined.Length, keywordMatch.Index + keywordMatch.Length + 250);
+            var window = combined[keywordMatch.Index..windowEnd];
 
-        var time = ExtractTime(combined);
-        if (time is null) return null;
+            var windowDate = ExtractDate(window);
+            if (windowDate is null) continue;
+            var windowTime = ExtractTime(window);
+            if (windowTime is null) continue;
 
-        var startsAt = dateOnly.Value.ToDateTime(new TimeOnly(time.Value.hour, time.Value.minute));
+            best = (windowDate.Value, windowTime.Value);
+            break;
+        }
+
+        if (best is null)
+        {
+            // Fall back to searching the whole message, e.g. when the keyword is only in the
+            // subject and the date/time is further away in the body.
+            var dateOnly = ExtractDate(combined);
+            if (dateOnly is null) return null;
+            var time = ExtractTime(combined);
+            if (time is null) return null;
+            best = (dateOnly.Value, time.Value);
+        }
+
+        var startsAt = best.Value.date.ToDateTime(new TimeOnly(best.Value.time.hour, best.Value.time.minute));
 
         var matchedNames = knownNames.Where(name => ContainsName(combined, name)).ToArray();
 
@@ -228,6 +304,25 @@ public class ImapAppointmentScanner
             && int.TryParse(enMatch.Groups[3].Value, out var enYear))
         {
             try { return new DateOnly(enYear, enMonth, enDay); } catch { return null; }
+        }
+
+        // Spelled-out months, e.g. "September 30, 2026" or "30. septembar 2026.".
+        var monthDayYear = MonthDayYearRegex.Match(content);
+        if (monthDayYear.Success
+            && MonthNames.TryGetValue(monthDayYear.Groups["month"].Value, out var mdyMonth)
+            && int.TryParse(monthDayYear.Groups["day"].Value, out var mdyDay)
+            && int.TryParse(monthDayYear.Groups["year"].Value, out var mdyYear))
+        {
+            try { return new DateOnly(mdyYear, mdyMonth, mdyDay); } catch { return null; }
+        }
+
+        var dayMonthYear = DayMonthYearRegex.Match(content);
+        if (dayMonthYear.Success
+            && MonthNames.TryGetValue(dayMonthYear.Groups["month"].Value, out var dmyMonth)
+            && int.TryParse(dayMonthYear.Groups["day"].Value, out var dmyDay)
+            && int.TryParse(dayMonthYear.Groups["year"].Value, out var dmyYear))
+        {
+            try { return new DateOnly(dmyYear, dmyMonth, dmyDay); } catch { return null; }
         }
 
         return null;
