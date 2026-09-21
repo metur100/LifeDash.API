@@ -20,12 +20,18 @@ public record ScannedAppointmentDto(
 public class ImapAppointmentScanner
 {
     private readonly MailTrackingOptions _options;
+    private readonly ReminderEmailOptions _reminderOptions;
     private readonly MicrosoftMailAuthService _msAuth;
     private readonly ILogger<ImapAppointmentScanner> _logger;
 
-    public ImapAppointmentScanner(IOptions<MailTrackingOptions> options, MicrosoftMailAuthService msAuth, ILogger<ImapAppointmentScanner> logger)
+    public ImapAppointmentScanner(
+        IOptions<MailTrackingOptions> options,
+        IOptions<ReminderEmailOptions> reminderOptions,
+        MicrosoftMailAuthService msAuth,
+        ILogger<ImapAppointmentScanner> logger)
     {
         _options = options.Value;
+        _reminderOptions = reminderOptions.Value;
         _msAuth = msAuth;
         _logger = logger;
     }
@@ -183,6 +189,11 @@ public class ImapAppointmentScanner
 
     private ScannedAppointmentDto? ParseAppointmentFromMessage(MimeMessage message, List<string> knownNames)
     {
+        // LifeDash's own reminder emails (ReminderEmailWorker) land in this same mailbox - since
+        // they mention "Termin" and include the appointment's date+time, they'd otherwise match the
+        // keyword+date/time heuristic below and get re-ingested as a duplicate "new" appointment.
+        if (IsOwnReminderEmail(message)) return null;
+
         var subject = message.Subject ?? "";
         var textBody = message.TextBody ?? "";
         // Strip tags/decode entities so wording split across HTML elements (e.g. a table cell)
@@ -237,6 +248,14 @@ public class ImapAppointmentScanner
         if (string.IsNullOrWhiteSpace(title)) title = "Termin (Postfach)";
 
         return new ScannedAppointmentDto(title, startsAt, matchedNames);
+    }
+
+    private bool IsOwnReminderEmail(MimeMessage message)
+    {
+        var reminderFrom = _reminderOptions.FromEmail?.Trim();
+        if (string.IsNullOrWhiteSpace(reminderFrom)) return false;
+
+        return message.From.Mailboxes.Any(m => string.Equals(m.Address, reminderFrom, StringComparison.OrdinalIgnoreCase));
     }
 
     private static (int hour, int minute)? ExtractTime(string content)
