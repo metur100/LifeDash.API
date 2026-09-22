@@ -22,6 +22,7 @@ public static class ModuleEndpoints
         app.MapOwned<TaskItem>("/api/tasks");
         app.MapOwned<Document>("/api/documents");
         app.MapOwned<Package>("/api/packages");
+        app.MapOwned<CategoryOption>("/api/category-options");
 
         // ---- dashboard ----
         app.MapGet("/api/dashboard", async (int? horizonDays, DeadlineEngine engine,

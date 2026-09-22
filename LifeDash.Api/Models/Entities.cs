@@ -24,6 +24,11 @@ public class FamilyMember : OwnedEntity
 {
     [MaxLength(160)] public string FullName { get; set; } = "";
     [MaxLength(60)]  public string? Relation { get; set; }
+    // Structural link for the family tree: this member is <RelationType> of the member at
+    // RelatedToFamilyMemberId (e.g. RelationType="parent", RelatedTo=<spouse> for a father-in-law).
+    // Kept separate from the free-text Relation label above, which is just what the UI displays.
+    public int? RelatedToFamilyMemberId { get; set; }
+    [MaxLength(30)]  public string? RelationType { get; set; }
     public DateOnly? BirthDate { get; set; }
     [MaxLength(80)]  public string? Nationality { get; set; }
     [MaxLength(160)] public string? SchoolName { get; set; }
@@ -250,6 +255,13 @@ public class Package : OwnedEntity
     // Sendungsverlauf: JSON array of { status, text, time, at }. Never queried by field, so a
     // JSON blob column keeps this a plain flat entity usable with the generic owned CRUD.
     [Column(TypeName = "nvarchar(max)")] public string? HistoryJson { get; set; }
+}
+
+public class CategoryOption : OwnedEntity
+{
+    [MaxLength(60)]  public string ListKey { get; set; } = "";
+    [MaxLength(60)]  public string Value { get; set; } = "";
+    [MaxLength(120)] public string Label { get; set; } = "";
 }
 
 public class TaskItem : OwnedEntity

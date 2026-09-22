@@ -54,8 +54,9 @@ public class AppointmentSyncService
             {
                 UserId = userId,
                 Title = s.Title,
-                Category = attendeeIds.Count > 0 ? "family" : "other",
+                Category = s.Category ?? (attendeeIds.Count > 0 ? "family" : "other"),
                 StartsAt = s.StartsAt,
+                Location = s.Location,
                 Notes = attendeeIds.Count > 0
                     ? "[mail-scan] Automatisch aus dem Postfach erkannt."
                     : "[mail-scan] Automatisch aus dem Postfach erkannt - Person nicht sicher zugeordnet, bitte prüfen.",

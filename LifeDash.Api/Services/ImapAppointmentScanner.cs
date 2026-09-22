@@ -11,7 +11,9 @@ namespace LifeDash.Api.Services;
 public record ScannedAppointmentDto(
     string Title,
     DateTime StartsAt,
-    string[] MatchedNames
+    string[] MatchedNames,
+    string? Category,
+    string? Location
 );
 
 // Scans the same mailbox as ImapPackageScanner for Termin confirmations instead of shipments.
@@ -247,7 +249,66 @@ public class ImapAppointmentScanner
                             .Replace("Re:", "", StringComparison.OrdinalIgnoreCase).Trim();
         if (string.IsNullOrWhiteSpace(title)) title = "Termin (Postfach)";
 
-        return new ScannedAppointmentDto(title, startsAt, matchedNames);
+        var senderDomain = message.From.Mailboxes.FirstOrDefault()?.Address.Split('@').ElementAtOrDefault(1) ?? "";
+        var category = DetectCategory(combined, senderDomain);
+        var location = DetectLocation(combined);
+
+        return new ScannedAppointmentDto(title, startsAt, matchedNames, category, location);
+    }
+
+    // Sender-domain rules take priority (e.g. any Doctolib confirmation is health regardless of
+    // wording), then keyword groups over the subject+body. Categories match the app's own
+    // Kategorie dropdown values (Termine.tsx APPOINTMENT_CATEGORIES) so scanned appointments land
+    // in the same buckets a user would pick by hand. Returns null when nothing matches, so the
+    // caller can fall back to its own attendee-based default.
+    private static readonly (string Domain, string Category)[] SenderDomainCategories =
+    [
+        ("doctolib", "health"),
+    ];
+
+    private static readonly (string Category, Regex Keywords)[] CategoryKeywordGroups =
+    [
+        ("health", new Regex(@"\b(arzt|zahnarzt|kinderarzt|hausarzt|impf|vorsorge|sprechstunde|apotheke|klinik|praxis|doctor|dentist|physician|ljekar|doktor)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        ("school", new Regex(@"\b(schule|kindergarten|kita|elternabend|elterngespräch|lehrer|school|teacher|škol\w*)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        ("authority", new Regex(@"\b(finanzamt|behörde|bürgeramt|ausländerbehörde|amt für|rathaus)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        ("finance", new Regex(@"\b(bank|sparkasse|versicherung|rechnung|invoice|zahlung)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        ("travel", new Regex(@"\b(flug|hotel|buchungsbestätigung|booking\.com|airbnb|reise|flight|reservation)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        ("home", new Regex(@"\b(handwerker|reparatur|lieferung|installateur|elektriker)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+    ];
+
+    private static string? DetectCategory(string combined, string senderDomain)
+    {
+        foreach (var (domain, category) in SenderDomainCategories)
+        {
+            if (senderDomain.Contains(domain, StringComparison.OrdinalIgnoreCase)) return category;
+        }
+
+        foreach (var (category, keywords) in CategoryKeywordGroups)
+        {
+            if (keywords.IsMatch(combined)) return category;
+        }
+
+        return null;
+    }
+
+    // "Ort:"/"Adresse:"/"Praxis ..." lines give a physical place; failing that, video-call
+    // keywords mean the appointment has no physical location at all.
+    private static readonly Regex LocationLineRegex = new(
+        @"(?:Ort|Adresse|Location|Praxis)\s*[:\-]?\s*(?<value>[^\r\n]{3,120})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex OnlineKeywordRegex = new(
+        @"\b(zoom|teams|videosprechstunde|videokonferenz|video call|online meeting|webinar)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static string? DetectLocation(string combined)
+    {
+        var lineMatch = LocationLineRegex.Match(combined);
+        if (lineMatch.Success)
+        {
+            var value = lineMatch.Groups["value"].Value.Trim();
+            if (value.Length > 0) return value;
+        }
+
+        return OnlineKeywordRegex.IsMatch(combined) ? "Online" : null;
     }
 
     private bool IsOwnReminderEmail(MimeMessage message)
