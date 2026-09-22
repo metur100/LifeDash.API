@@ -29,6 +29,9 @@ public class FamilyMember : OwnedEntity
     // Kept separate from the free-text Relation label above, which is just what the UI displays.
     public int? RelatedToFamilyMemberId { get; set; }
     [MaxLength(30)]  public string? RelationType { get; set; }
+    // Marks the one member the family tree is rooted at ("Ich") - needed since generation/branch
+    // direction is computed relative to a fixed point, not derivable from the edges alone.
+    public bool IsSelf { get; set; }
     public DateOnly? BirthDate { get; set; }
     [MaxLength(80)]  public string? Nationality { get; set; }
     [MaxLength(160)] public string? SchoolName { get; set; }

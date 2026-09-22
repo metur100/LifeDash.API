@@ -37,7 +37,10 @@ public static class CrudEndpoints
             await db.SaveChangesAsync(ct);
 
             if (input is FamilyMember fm)
+            {
                 await SyncBirthdayAsync(fm, db, ct);
+                await EnsureSingleSelfAsync(fm, db, ct);
+            }
 
             return Results.Created($"{route}/{input.Id}", input);
         });
@@ -52,7 +55,10 @@ public static class CrudEndpoints
             await db.SaveChangesAsync(ct);
 
             if (existing is FamilyMember fm)
+            {
                 await SyncBirthdayAsync(fm, db, ct);
+                await EnsureSingleSelfAsync(fm, db, ct);
+            }
 
             return Results.Ok(existing);
         });
@@ -130,5 +136,16 @@ public static class CrudEndpoints
         }
 
         await db.SaveChangesAsync(ct);
+    }
+
+    // Only one FamilyMember can be the family tree's root ("Ich") at a time - clear the flag on
+    // everyone else for this user whenever a member is saved with IsSelf set.
+    private static async Task EnsureSingleSelfAsync(FamilyMember fm, LifeDashContext db, CancellationToken ct)
+    {
+        if (!fm.IsSelf) return;
+
+        await db.FamilyMembers
+            .Where(x => x.UserId == fm.UserId && x.Id != fm.Id && x.IsSelf)
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.IsSelf, false), ct);
     }
 }
