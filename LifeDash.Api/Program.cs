@@ -121,6 +121,15 @@ using (var scope = app.Services.CreateScope())
                     FOREIGN KEY (BookingId) REFERENCES dbo.Bookings(Id) ON DELETE SET NULL;
             """);
 
+        await db.Database.ExecuteSqlRawAsync("""
+            IF COL_LENGTH('dbo.Appointments', 'Recurrence') IS NULL
+                ALTER TABLE dbo.Appointments ADD Recurrence NVARCHAR(20) NULL;
+            """);
+        await db.Database.ExecuteSqlRawAsync("""
+            IF COL_LENGTH('dbo.Appointments', 'RecurrenceUntil') IS NULL
+                ALTER TABLE dbo.Appointments ADD RecurrenceUntil DATE NULL;
+            """);
+
         var seeded = db.Users.FirstOrDefault(u => u.PasswordHash == "SEED");
         if (seeded is not null)
         {

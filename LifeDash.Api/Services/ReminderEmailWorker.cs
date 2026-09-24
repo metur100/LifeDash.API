@@ -186,36 +186,49 @@ public class ReminderEmailWorker : BackgroundService
 
         foreach (var a in appointments)
         {
-            var eventDate = DateOnly.FromDateTime(a.StartsAt);
+            var recurring = AppointmentRecurrence.IsRecurring(a);
             var attendees = a.Attendees.Select(x => memberNames.GetValueOrDefault(x.FamilyMemberId, "-")).ToList();
-            var rows = new[]
+            (string, string)[] RowsFor(DateTime startsAt) => new[]
             {
-                ("Datum & Uhrzeit", a.StartsAt.ToString("dd.MM.yyyy HH:mm")),
+                ("Datum & Uhrzeit", startsAt.ToString("dd.MM.yyyy HH:mm")),
                 ("Ort", a.Location ?? ""),
                 ("Kategorie", Label(AppointmentCategoryLabels, a.Category)),
                 ("Teilnehmer", attendees.Count > 0 ? string.Join(", ", attendees) : ""),
             };
 
-            if (afterSendHour && eventDate == tomorrow)
+            // A series sends one pair of markers per occurrence; drop the ones for past
+            // occurrences so Notes (max 2000 chars) doesn't fill up over the months.
+            if (recurring)
+            {
+                var pruned = PruneAppointmentMarkers(a.Notes, today);
+                if (pruned != a.Notes) a.Notes = pruned;
+            }
+
+            var tomorrowOccurrence = recurring
+                ? AppointmentRecurrence.OccurrenceOn(a, tomorrow)
+                : DateOnly.FromDateTime(a.StartsAt) == tomorrow ? a.StartsAt : null;
+            if (afterSendHour && tomorrowOccurrence is { } dayBefore)
             {
                 var body = EmailTemplate.Render(
                     "#4f6df5", "📅", "Termin", a.Title, "Morgen fällig",
-                    "Dieser Termin steht morgen an.", rows,
+                    "Dieser Termin steht morgen an.", RowsFor(dayBefore),
                     AppUrl("/family"), "Termin ansehen",
                     "LifeDash erinnert dich automatisch einen Tag vor jedem Termin.");
-                await SendReminderAsync(a.Notes, MarkerFor(AppointmentSentTag, eventDate),
+                await SendReminderAsync(a.Notes, MarkerFor(AppointmentSentTag, tomorrow),
                     $"Erinnerung morgen: {a.Title}", body, ct, n => a.Notes = n);
             }
 
-            var timeUntilAppointment = a.StartsAt - now;
+            var startsAt = recurring ? AppointmentRecurrence.NextOccurrence(a, now) : a.StartsAt;
+            if (startsAt is not { } next) continue;
+            var timeUntilAppointment = next - now;
             if (timeUntilAppointment > TimeSpan.Zero && timeUntilAppointment <= TimeSpan.FromHours(1))
             {
                 var body = EmailTemplate.Render(
                     "#4f6df5", "📅", "Termin", a.Title, "In einer Stunde",
-                    "Dieser Termin beginnt in weniger als einer Stunde.", rows,
+                    "Dieser Termin beginnt in weniger als einer Stunde.", RowsFor(next),
                     AppUrl("/family"), "Termin ansehen",
                     "LifeDash erinnert dich automatisch ungefähr eine Stunde vor dem Termin.");
-                await SendReminderAsync(a.Notes, MarkerFor(AppointmentOneHourSentTag, a.StartsAt),
+                await SendReminderAsync(a.Notes, MarkerFor(AppointmentOneHourSentTag, next),
                     $"Termin in einer Stunde: {a.Title}", body, ct, n => a.Notes = n);
             }
         }
@@ -596,6 +609,23 @@ public class ReminderEmailWorker : BackgroundService
 
     private static string MarkerFor(string tag, DateTime dateTime) => $"{tag}:{dateTime:yyyyMMddHHmm}";
     private static string MarkerFor(string tag, DateOnly date) => $"{tag}:{date:yyyyMMdd}";
+
+    /// <summary>Removes appointment reminder markers whose occurrence date lies before `today`.</summary>
+    private static string? PruneAppointmentMarkers(string? notes, DateOnly today)
+    {
+        if (string.IsNullOrWhiteSpace(notes)) return notes;
+        var lines = notes.Split('\n');
+        var kept = lines.Where(line =>
+        {
+            var l = line.Trim();
+            string? stamp = null;
+            if (l.StartsWith(AppointmentSentTag + ":", StringComparison.Ordinal)) stamp = l[(AppointmentSentTag.Length + 1)..];
+            else if (l.StartsWith(AppointmentOneHourSentTag + ":", StringComparison.Ordinal)) stamp = l[(AppointmentOneHourSentTag.Length + 1)..];
+            if (stamp is null || stamp.Length < 8) return true;
+            return !DateOnly.TryParseExact(stamp[..8], "yyyyMMdd", out var d) || d >= today;
+        }).ToArray();
+        return kept.Length == lines.Length ? notes : string.Join('\n', kept).Trim();
+    }
 
     private static bool HasMarker(string? notes, string marker) =>
         !string.IsNullOrWhiteSpace(notes) && notes.Contains(marker, StringComparison.Ordinal);

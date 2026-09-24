@@ -168,13 +168,21 @@ public class DeadlineEngine(LifeDashContext db)
 
         foreach (var a in appts)
         {
-            var date = DateOnly.FromDateTime(a.StartsAt);
+            // A repeating series only ever alerts for its next occurrence from today on.
+            var startsAt = a.StartsAt;
+            if (AppointmentRecurrence.IsRecurring(a))
+            {
+                if (AppointmentRecurrence.NextOccurrence(a, today.ToDateTime(TimeOnly.MinValue)) is not { } next
+                    || DateOnly.FromDateTime(next) > horizon) continue;
+                startsAt = next;
+            }
+            var date = DateOnly.FromDateTime(startsAt);
             var days = date.DayNumber - today.DayNumber;
             if (days < -1) continue;
             alerts.Add(new Alert(
                 $"appt-{a.Id}", MapModule(a.Category), "appointment", Grade(days),
                 a.Title,
-                $"{a.StartsAt:dd.MM.yyyy HH:mm}{(string.IsNullOrWhiteSpace(a.Location) ? "" : $", {a.Location}")} — {Countdown(days)}.",
+                $"{startsAt:dd.MM.yyyy HH:mm}{(string.IsNullOrWhiteSpace(a.Location) ? "" : $", {a.Location}")} — {Countdown(days)}.",
                 date, days, "Termin öffnen", "/family", "Appointment", a.Id));
         }
 

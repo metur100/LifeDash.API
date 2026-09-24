@@ -12,6 +12,8 @@ public record AppointmentDto(
     int ReminderDays,
     string? Notes,
     bool IsDone,
+    string? Recurrence,
+    DateOnly? RecurrenceUntil,
     List<int> AttendeeIds
 );
 
@@ -25,5 +27,7 @@ public record AppointmentInput(
     int ReminderDays,
     string? Notes,
     bool IsDone,
-    List<int>? AttendeeIds
+    List<int>? AttendeeIds,
+    string? Recurrence = null,
+    DateOnly? RecurrenceUntil = null
 );

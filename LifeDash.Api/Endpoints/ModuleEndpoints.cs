@@ -62,6 +62,8 @@ public static class ModuleEndpoints
                 ReminderDays = input.ReminderDays,
                 Notes = input.Notes,
                 IsDone = input.IsDone,
+                Recurrence = AppointmentRecurrence.Normalize(input.Recurrence),
+                RecurrenceUntil = input.RecurrenceUntil,
                 Attendees = (input.AttendeeIds ?? new()).Distinct()
                     .Select(mid => new AppointmentAttendee { FamilyMemberId = mid }).ToList(),
             };
@@ -84,6 +86,8 @@ public static class ModuleEndpoints
             a.ReminderDays = input.ReminderDays;
             a.Notes = input.Notes;
             a.IsDone = input.IsDone;
+            a.Recurrence = AppointmentRecurrence.Normalize(input.Recurrence);
+            a.RecurrenceUntil = input.RecurrenceUntil;
 
             db.AppointmentAttendees.RemoveRange(a.Attendees);
             a.Attendees = (input.AttendeeIds ?? new()).Distinct()
@@ -438,7 +442,7 @@ public static class ModuleEndpoints
 
     private static AppointmentDto ToDto(Appointment a) => new(
         a.Id, a.UserId, a.Title, a.Category, a.StartsAt, a.EndsAt, a.Location,
-        a.ReminderDays, a.Notes, a.IsDone, a.Attendees.Select(x => x.FamilyMemberId).ToList());
+        a.ReminderDays, a.Notes, a.IsDone, a.Recurrence, a.RecurrenceUntil, a.Attendees.Select(x => x.FamilyMemberId).ToList());
 
     private static string? ResolveStoragePath(string? rawPath)
     {

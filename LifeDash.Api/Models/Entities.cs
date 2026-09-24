@@ -69,6 +69,10 @@ public class Appointment : OwnedEntity
     public int ReminderDays { get; set; } = 3;
     [MaxLength(2000)]public string? Notes { get; set; }
     public bool IsDone { get; set; }
+    // null = one-off; otherwise daily|weekly|biweekly|monthly|yearly. StartsAt is the series
+    // anchor, every occurrence is computed from it (see AppointmentRecurrence).
+    [MaxLength(20)]  public string? Recurrence { get; set; }
+    public DateOnly? RecurrenceUntil { get; set; }
     public List<AppointmentAttendee> Attendees { get; set; } = new();
 }
 
