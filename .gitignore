@@ -10,4 +10,5 @@ logs/
 # Local/production secrets (use environment variables in production)
 LifeDash.Api/appsettings.json
 LifeDash.Api/appsettings.Development.json
+LifeDash.Api/appsettings.Auth.json
 LifeDash.Api/Properties/PublishProfiles/*.pubxml.user

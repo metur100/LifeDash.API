@@ -16,6 +16,28 @@ jobs:
         with:
           dotnet-version: 8.0
 
+      # AUTH_ALLOWED_EMAILS: comma-separated, e.g. "me@gmail.com"
+      # AUTH_SHARED_LOGINS: comma-separated "login=owner" pairs, e.g. "wife@gmail.com=me@gmail.com"
+      - name: Write login config
+        shell: pwsh
+        env:
+          AUTH_ALLOWED_EMAILS: ${{ secrets.AUTH_ALLOWED_EMAILS }}
+          AUTH_SHARED_LOGINS: ${{ secrets.AUTH_SHARED_LOGINS }}
+        run: |
+          $allowed = @("$env:AUTH_ALLOWED_EMAILS" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          $shared = [ordered]@{}
+          foreach ($pair in "$env:AUTH_SHARED_LOGINS" -split ',') {
+            $parts = $pair -split '=', 2
+            if ($parts.Count -eq 2 -and $parts[0].Trim() -and $parts[1].Trim()) { $shared[$parts[0].Trim()] = $parts[1].Trim() }
+          }
+          if ($allowed.Count -eq 0 -and $shared.Count -eq 0) {
+            Write-Error "AUTH_ALLOWED_EMAILS / AUTH_SHARED_LOGINS are empty - refusing to deploy an API open to every Google account."
+            exit 1
+          }
+          @{ Auth = @{ AllowedEmails = $allowed; SharedLogins = $shared } } |
+            ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 LifeDash.Api/appsettings.Auth.json
+          Write-Host "Login config: $($allowed.Count) allowed email(s), $($shared.Count) shared login(s)."
+
       - name: Restore
         run: dotnet restore LifeDash.Api/LifeDash.Api.csproj
 

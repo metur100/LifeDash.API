@@ -44,6 +44,43 @@ public static class AuthEndpoints
             if (!payload.EmailVerified)
                 return Results.Json(new { error = "Google-Konto hat keine verifizierte E-Mail." }, statusCode: 401);
 
+            // Auth:SharedLogins maps a Google email to the account it signs into (shared household login).
+            // Auth:AllowedEmails plus the shared logins form the allow-list; when both are empty everyone is allowed.
+            var sharedLogins = cfg.GetSection("Auth:SharedLogins").GetChildren()
+                .Where(c => !string.IsNullOrWhiteSpace(c.Value))
+                .ToDictionary(c => c.Key.Trim().ToLowerInvariant(), c => c.Value!.Trim().ToLowerInvariant());
+            var allowed = cfg.GetSection("Auth:AllowedEmails").GetChildren()
+                .Select(c => c.Value?.Trim().ToLowerInvariant())
+                .Where(e => !string.IsNullOrWhiteSpace(e))
+                .Concat(sharedLogins.Keys)
+                .ToHashSet();
+            if (allowed.Count > 0 && !allowed.Contains(email))
+            {
+                logger.LogWarning("Google login rejected for {Email}: not in Auth:AllowedEmails.", email);
+                return Results.Json(new { error = "Dieses Google-Konto hat keinen Zugriff auf LifeDash." }, statusCode: 403);
+            }
+
+            if (sharedLogins.TryGetValue(email, out var ownerEmail))
+            {
+                User? owner;
+                try
+                {
+                    owner = await db.Users.FirstOrDefaultAsync(u => u.Email == ownerEmail, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Google login failed while reading shared owner {Owner}.", ownerEmail);
+                    return Results.Json(new { error = "Datenbank nicht erreichbar. Bitte versuche es gleich erneut." }, statusCode: 503);
+                }
+                if (owner is null)
+                {
+                    logger.LogWarning("Shared login {Email} points to unknown user {Owner}.", email, ownerEmail);
+                    return Results.Json(new { error = "Das freigegebene Konto wurde nicht gefunden." }, statusCode: 403);
+                }
+                logger.LogInformation("Shared login: {Email} signed in as {Owner}.", email, ownerEmail);
+                return Results.Ok(new AuthResponse(tokens.Create(owner), owner.Id, owner.Email, owner.DisplayName));
+            }
+
             var displayName = string.IsNullOrWhiteSpace(payload.Name) ? email : payload.Name.Trim();
             if (displayName.Length > 128)
                 displayName = displayName[..128];
