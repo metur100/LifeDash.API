@@ -212,7 +212,7 @@ public class ReminderEmailWorker : BackgroundService
                 var body = EmailTemplate.Render(
                     "#4f6df5", "📅", "Termin", a.Title, "Morgen fällig",
                     "Dieser Termin steht morgen an.", RowsFor(dayBefore),
-                    AppUrl("/family"), "Termin ansehen",
+                    AppUrl("/termine"), "Termin ansehen",
                     "LifeDash erinnert dich automatisch einen Tag vor jedem Termin.");
                 await SendReminderAsync(a.Notes, MarkerFor(AppointmentSentTag, tomorrow),
                     $"Erinnerung morgen: {a.Title}", body, ct, n => a.Notes = n);
@@ -226,7 +226,7 @@ public class ReminderEmailWorker : BackgroundService
                 var body = EmailTemplate.Render(
                     "#4f6df5", "📅", "Termin", a.Title, "In einer Stunde",
                     "Dieser Termin beginnt in weniger als einer Stunde.", RowsFor(next),
-                    AppUrl("/family"), "Termin ansehen",
+                    AppUrl("/termine"), "Termin ansehen",
                     "LifeDash erinnert dich automatisch ungefähr eine Stunde vor dem Termin.");
                 await SendReminderAsync(a.Notes, MarkerFor(AppointmentOneHourSentTag, next),
                     $"Termin in einer Stunde: {a.Title}", body, ct, n => a.Notes = n);
@@ -285,7 +285,7 @@ public class ReminderEmailWorker : BackgroundService
                     ("Datum", occurrence.Value.ToString("dd.MM.yyyy")),
                     ("Person", person),
                 },
-                AppUrl("/family"), "Im Familienbereich ansehen",
+                AppUrl("/termine"), "In den Terminen ansehen",
                 "LifeDash erinnert dich automatisch am Tag selbst an wichtigen Anlässen.");
 
             await SendReminderAsync(i.Notes, MarkerFor(BirthdaySentTag, occurrence.Value),

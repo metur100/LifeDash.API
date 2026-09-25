@@ -183,7 +183,7 @@ public class DeadlineEngine(LifeDashContext db)
                 $"appt-{a.Id}", MapModule(a.Category), "appointment", Grade(days),
                 a.Title,
                 $"{startsAt:dd.MM.yyyy HH:mm}{(string.IsNullOrWhiteSpace(a.Location) ? "" : $", {a.Location}")} — {Countdown(days)}.",
-                date, days, "Termin öffnen", "/family", "Appointment", a.Id));
+                date, days, "Zu den Terminen", "/termine", "Appointment", a.Id));
         }
 
         // ---------- 8. important dates (yearly roll-forward) ----------
@@ -198,7 +198,7 @@ public class DeadlineEngine(LifeDashContext db)
             alerts.Add(new Alert(
                 $"date-{i.Id}", "family", "birthday", Grade(days),
                 i.Title, $"{next:dd.MM.yyyy} — {Countdown(days)}.",
-                next, days, "Im Familienbereich ansehen", "/family", "ImportantDate", i.Id));
+                next, days, "Zu den Terminen", "/termine", "ImportantDate", i.Id));
         }
 
         // ---------- 9. open tasks ----------
