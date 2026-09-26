@@ -216,23 +216,23 @@ public class DeadlineEngine(LifeDashContext db)
                 t.DueOn, days, "Erledigen", "/tasks", "TaskItem", t.Id));
         }
 
-        // ---------- 10. upcoming trip ----------
+        // ---------- 10. upcoming trips ----------
         var trips = await db.Trips.AsNoTracking()
             .Include(t => t.PackingItems)
             .Where(t => t.UserId == userId && t.StartsOn >= today)
             .OrderBy(t => t.StartsOn).ToListAsync(ct);
 
         var nextTrip = trips.FirstOrDefault();
-        if (nextTrip is not null && nextTrip.StartsOn <= horizon)
+        foreach (var trip in trips.Where(t => t.StartsOn <= horizon))
         {
-            var days = nextTrip.StartsOn.DayNumber - today.DayNumber;
-            var unpacked = nextTrip.PackingItems.Count(p => !p.IsPacked);
+            var days = trip.StartsOn.DayNumber - today.DayNumber;
+            var unpacked = trip.PackingItems.Count(p => !p.IsPacked);
             alerts.Add(new Alert(
-                $"trip-{nextTrip.Id}", "travel", "trip",
+                $"trip-{trip.Id}", "travel", "trip",
                 Grade(days),
-                nextTrip.Title,
+                trip.Title,
                 $"Abreise {Countdown(days)}" + (unpacked > 0 ? $", {unpacked} Positionen noch nicht gepackt." : "."),
-                nextTrip.StartsOn, days, "Reise öffnen", $"/travel/{nextTrip.Id}", "Trip", nextTrip.Id));
+                trip.StartsOn, days, "Reise öffnen", $"/travel/{trip.Id}", "Trip", trip.Id));
         }
 
         alerts = alerts
