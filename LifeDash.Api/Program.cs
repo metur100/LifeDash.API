@@ -101,53 +101,64 @@ app.Use(async (ctx, next) =>
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<LifeDashContext>();
+    // Each schema patch runs on its own, so one failing statement (e.g. a constraint that clashes
+    // with existing data) can't silently skip every patch after it.
+    string[] schemaPatches =
+    [
+        """
+        IF COL_LENGTH('dbo.Trips', 'StartPlace') IS NULL
+            ALTER TABLE dbo.Trips ADD StartPlace NVARCHAR(200) NULL;
+        """,
+        """
+        IF COL_LENGTH('dbo.Bookings', 'Direction') IS NULL
+            ALTER TABLE dbo.Bookings ADD Direction NVARCHAR(20) NULL;
+        """,
+        """
+        IF COL_LENGTH('dbo.PackingItems', 'BookingId') IS NULL
+            ALTER TABLE dbo.PackingItems ADD BookingId INT NULL;
+        """,
+        """
+        IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_PackingItems_Bookings')
+            ALTER TABLE dbo.PackingItems ADD CONSTRAINT FK_PackingItems_Bookings
+                FOREIGN KEY (BookingId) REFERENCES dbo.Bookings(Id) ON DELETE SET NULL;
+        """,
+        """
+        IF COL_LENGTH('dbo.Appointments', 'Recurrence') IS NULL
+            ALTER TABLE dbo.Appointments ADD Recurrence NVARCHAR(20) NULL;
+        """,
+        """
+        IF COL_LENGTH('dbo.Appointments', 'RecurrenceUntil') IS NULL
+            ALTER TABLE dbo.Appointments ADD RecurrenceUntil DATE NULL;
+        """,
+        """
+        IF OBJECT_ID('dbo.SavingsEntries', 'U') IS NULL
+            CREATE TABLE dbo.SavingsEntries (
+                Id        INT IDENTITY(1,1) PRIMARY KEY,
+                UserId    INT NOT NULL,
+                Kind      NVARCHAR(20)  NOT NULL CONSTRAINT DF_SavingsEntries_Kind DEFAULT 'deposit',
+                Amount    DECIMAL(12,2) NOT NULL,
+                Currency  NVARCHAR(3)   NOT NULL CONSTRAINT DF_SavingsEntries_Currency DEFAULT 'EUR',
+                EntryDate DATE NOT NULL,
+                Note      NVARCHAR(300) NULL,
+                CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_SavingsEntries_CreatedAt DEFAULT SYSUTCDATETIME(),
+                CONSTRAINT FK_SavingsEntries_Users FOREIGN KEY (UserId) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+            );
+        """,
+        """
+        IF OBJECT_ID('dbo.SavingsEntries', 'U') IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_SavingsEntries_UserId' AND object_id = OBJECT_ID('dbo.SavingsEntries'))
+            CREATE INDEX IX_SavingsEntries_UserId ON dbo.SavingsEntries(UserId);
+        """,
+    ];
+
+    foreach (var sql in schemaPatches)
+    {
+        try { await db.Database.ExecuteSqlRawAsync(sql); }
+        catch (Exception ex) { app.Logger.LogWarning(ex, "Schema patch failed at startup: {Sql}", sql.Trim()); }
+    }
+
     try
     {
-        await db.Database.ExecuteSqlRawAsync("""
-            IF COL_LENGTH('dbo.Trips', 'StartPlace') IS NULL
-                ALTER TABLE dbo.Trips ADD StartPlace NVARCHAR(200) NULL;
-            """);
-        await db.Database.ExecuteSqlRawAsync("""
-            IF COL_LENGTH('dbo.Bookings', 'Direction') IS NULL
-                ALTER TABLE dbo.Bookings ADD Direction NVARCHAR(20) NULL;
-            """);
-        await db.Database.ExecuteSqlRawAsync("""
-            IF COL_LENGTH('dbo.PackingItems', 'BookingId') IS NULL
-                ALTER TABLE dbo.PackingItems ADD BookingId INT NULL;
-            """);
-        await db.Database.ExecuteSqlRawAsync("""
-            IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_PackingItems_Bookings')
-                ALTER TABLE dbo.PackingItems ADD CONSTRAINT FK_PackingItems_Bookings
-                    FOREIGN KEY (BookingId) REFERENCES dbo.Bookings(Id) ON DELETE SET NULL;
-            """);
-
-        await db.Database.ExecuteSqlRawAsync("""
-            IF COL_LENGTH('dbo.Appointments', 'Recurrence') IS NULL
-                ALTER TABLE dbo.Appointments ADD Recurrence NVARCHAR(20) NULL;
-            """);
-        await db.Database.ExecuteSqlRawAsync("""
-            IF COL_LENGTH('dbo.Appointments', 'RecurrenceUntil') IS NULL
-                ALTER TABLE dbo.Appointments ADD RecurrenceUntil DATE NULL;
-            """);
-
-        await db.Database.ExecuteSqlRawAsync("""
-            IF OBJECT_ID('dbo.SavingsEntries', 'U') IS NULL
-            BEGIN
-                CREATE TABLE dbo.SavingsEntries (
-                    Id        INT IDENTITY(1,1) PRIMARY KEY,
-                    UserId    INT NOT NULL,
-                    Kind      NVARCHAR(20)  NOT NULL CONSTRAINT DF_SavingsEntries_Kind DEFAULT 'deposit',
-                    Amount    DECIMAL(12,2) NOT NULL,
-                    Currency  NVARCHAR(3)   NOT NULL CONSTRAINT DF_SavingsEntries_Currency DEFAULT 'EUR',
-                    EntryDate DATE NOT NULL,
-                    Note      NVARCHAR(300) NULL,
-                    CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_SavingsEntries_CreatedAt DEFAULT SYSUTCDATETIME(),
-                    CONSTRAINT FK_SavingsEntries_Users FOREIGN KEY (UserId) REFERENCES dbo.Users(Id) ON DELETE CASCADE
-                );
-                CREATE INDEX IX_SavingsEntries_UserId ON dbo.SavingsEntries(UserId);
-            END
-            """);
-
         var seeded = db.Users.FirstOrDefault(u => u.PasswordHash == "SEED");
         if (seeded is not null)
         {
