@@ -130,6 +130,24 @@ using (var scope = app.Services.CreateScope())
                 ALTER TABLE dbo.Appointments ADD RecurrenceUntil DATE NULL;
             """);
 
+        await db.Database.ExecuteSqlRawAsync("""
+            IF OBJECT_ID('dbo.SavingsEntries', 'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.SavingsEntries (
+                    Id        INT IDENTITY(1,1) PRIMARY KEY,
+                    UserId    INT NOT NULL,
+                    Kind      NVARCHAR(20)  NOT NULL CONSTRAINT DF_SavingsEntries_Kind DEFAULT 'deposit',
+                    Amount    DECIMAL(12,2) NOT NULL,
+                    Currency  NVARCHAR(3)   NOT NULL CONSTRAINT DF_SavingsEntries_Currency DEFAULT 'EUR',
+                    EntryDate DATE NOT NULL,
+                    Note      NVARCHAR(300) NULL,
+                    CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_SavingsEntries_CreatedAt DEFAULT SYSUTCDATETIME(),
+                    CONSTRAINT FK_SavingsEntries_Users FOREIGN KEY (UserId) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+                );
+                CREATE INDEX IX_SavingsEntries_UserId ON dbo.SavingsEntries(UserId);
+            END
+            """);
+
         var seeded = db.Users.FirstOrDefault(u => u.PasswordHash == "SEED");
         if (seeded is not null)
         {

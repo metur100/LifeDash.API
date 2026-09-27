@@ -271,6 +271,17 @@ public class CategoryOption : OwnedEntity
     [MaxLength(120)] public string Label { get; set; } = "";
 }
 
+public class SavingsEntry : OwnedEntity
+{
+    [MaxLength(20)]  public string Kind { get; set; } = "deposit"; // deposit|withdrawal
+    // Always positive - Kind decides the sign. Balance = sum(deposits) - sum(withdrawals).
+    [Column(TypeName="decimal(12,2)")] public decimal Amount { get; set; }
+    [MaxLength(3)]   public string Currency { get; set; } = "EUR";
+    public DateOnly EntryDate { get; set; }
+    [MaxLength(300)] public string? Note { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public class TaskItem : OwnedEntity
 {
     [MaxLength(240)] public string Title { get; set; } = "";

@@ -38,6 +38,7 @@ public class LifeDashContext : DbContext
     public DbSet<TaskItem> Tasks => Set<TaskItem>();
     public DbSet<Package> Packages => Set<Package>();
     public DbSet<CategoryOption> CategoryOptions => Set<CategoryOption>();
+    public DbSet<SavingsEntry> SavingsEntries => Set<SavingsEntry>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
