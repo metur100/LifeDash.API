@@ -25,7 +25,6 @@ public class ReminderEmailWorker : BackgroundService
     private const string AppointmentSentTag = "[appt-reminder-sent]";
     private const string FlightSentTag = "[flight-checkin-reminder-sent]";
     private const string PaymentSentTag = "[payment-reminder-sent]";
-    private const string FixedCostSentTag = "[fixedcost-reminder-sent]";
     private const string IncomeSentTag = "[income-reminder-sent]";
     private const string ContractCancelSentTag = "[contract-cancel-reminder-sent]";
     private const string AuthorityCaseSentTag = "[authority-case-reminder-sent]";
@@ -360,7 +359,6 @@ public class ReminderEmailWorker : BackgroundService
 
     private async Task SendFixedCostRemindersAsync(LifeDashContext db, DateOnly today, CancellationToken ct)
     {
-        var tomorrow = today.AddDays(1);
         var costs = await db.FixedCosts
             .Where(c => c.IsActive && c.DayOfMonth != null)
             .ToListAsync(ct);
@@ -373,7 +371,7 @@ public class ReminderEmailWorker : BackgroundService
             var anchor = billingDate ?? DateOccurrence.NextMonthly(c.DayOfMonth, today);
             if (anchor is null) continue;
             var nextDue = DateOccurrence.NextFromAnchor(anchor.Value, c.Cadence, today);
-            if (nextDue != tomorrow && nextDue != today) continue;
+            if (nextDue != today) continue; // Fixkosten remind on the due day only
 
             // Once a projected occurrence has been marked paid once, the app
             // materializes a real Payment row for the next one (so "paid" can
@@ -395,27 +393,13 @@ public class ReminderEmailWorker : BackgroundService
                 ("Kategorie", Label(CostCategoryLabels, c.Category)),
             };
 
-            if (nextDue == tomorrow)
-            {
-                var body = EmailTemplate.Render(
-                    "#ef4444", "💳", "Finanzen · Fixkosten", c.Name, "Morgen fällig",
-                    "Diese wiederkehrenden Kosten sind morgen fällig.", rows,
-                    AppUrl("/finance"), "In Finanzen öffnen",
-                    "LifeDash erinnert dich automatisch einen Tag vor jeder fälligen Fixkosten-Zahlung.");
-                await SendReminderAsync(c.Notes, MarkerFor(FixedCostSentTag, nextDue),
-                    $"Fixkosten morgen fällig: {c.Name}", body, ct, n => c.Notes = n);
-            }
-
-            if (nextDue == today)
-            {
-                var body = EmailTemplate.Render(
-                    "#ef4444", "💳", "Finanzen · Fixkosten", c.Name, "Heute fällig",
-                    "Diese wiederkehrenden Kosten sind heute fällig.", rows,
-                    AppUrl("/finance"), "In Finanzen öffnen",
-                    "LifeDash erinnert dich automatisch am Fälligkeitstag jeder Fixkosten-Zahlung.");
-                await SendReminderAsync(c.Notes, MarkerFor(FixedCostDueTodaySentTag, nextDue),
-                    $"Fixkosten heute fällig: {c.Name}", body, ct, n => c.Notes = n);
-            }
+            var body = EmailTemplate.Render(
+                "#ef4444", "💳", "Finanzen · Fixkosten", c.Name, "Heute fällig",
+                "Diese wiederkehrenden Kosten sind heute fällig.", rows,
+                AppUrl("/finance"), "In Finanzen öffnen",
+                "LifeDash erinnert dich automatisch am Fälligkeitstag jeder Fixkosten-Zahlung.");
+            await SendReminderAsync(c.Notes, MarkerFor(FixedCostDueTodaySentTag, nextDue),
+                $"Fixkosten heute fällig: {c.Name}", body, ct, n => c.Notes = n);
         }
     }
 
