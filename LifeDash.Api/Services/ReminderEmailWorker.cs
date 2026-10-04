@@ -362,6 +362,10 @@ public class ReminderEmailWorker : BackgroundService
         var costs = await db.FixedCosts
             .Where(c => c.IsActive && c.DayOfMonth != null)
             .ToListAsync(ct);
+        var paymentsToday = await db.Payments.AsNoTracking()
+            .Where(p => p.DueOn == today)
+            .Select(p => new { p.UserId, p.Title })
+            .ToListAsync(ct);
 
         foreach (var c in costs)
         {
@@ -376,13 +380,16 @@ public class ReminderEmailWorker : BackgroundService
             // Once a projected occurrence has been marked paid once, the app
             // materializes a real Payment row for the next one (so "paid" can
             // be tracked) - the underlying FixedCost still projects that same
-            // date too. If a matching unpaid Payment already exists for this
-            // exact occurrence, SendPaymentRemindersAsync will handle it -
-            // skip here so it's one email, not two.
-            var duplicatePayment = await db.Payments.AnyAsync(p =>
-                !p.IsPaid && p.DueOn == nextDue && p.Title == c.Name &&
-                (p.Category ?? "") == (c.Category ?? "") &&
-                Math.Abs(p.Amount - c.Amount) < 0.005m, ct);
+            // date too. If a Payment already exists for this occurrence, it is
+            // the same bill: unpaid -> SendPaymentRemindersAsync handles it,
+            // paid -> nothing to remind about. Either way skip here so it's one
+            // email, not two. Match on name + date only: the UI stores a
+            // fallback category ("Fixkosten") and the payment's amount/category
+            // can be edited independently, so stricter matching misses it.
+            var name = c.Name.Trim();
+            var duplicatePayment = paymentsToday.Any(p =>
+                p.UserId == c.UserId &&
+                string.Equals(p.Title.Trim(), name, StringComparison.OrdinalIgnoreCase));
             if (duplicatePayment) continue;
 
             var rows = new[]
