@@ -196,14 +196,15 @@ public class ImapAppointmentScanner
         // keyword+date/time heuristic below and get re-ingested as a duplicate "new" appointment.
         if (IsOwnReminderEmail(message)) return null;
 
-        var subject = message.Subject ?? "";
-        var textBody = message.TextBody ?? "";
-        // Strip tags/decode entities so wording split across HTML elements (e.g. a table cell)
-        // still reads as plain text for the keyword/date/time regexes below.
-        var htmlBody = string.IsNullOrEmpty(message.HtmlBody)
-            ? ""
-            : System.Net.WebUtility.HtmlDecode(Regex.Replace(message.HtmlBody, "<[^>]+>", " "));
-        var combined = $"{subject}\n{textBody}\n{htmlBody}";
+        var rawSubject = message.Subject ?? "";
+        var subject = ForwardPrefixRegex.Replace(rawSubject, "").Trim();
+
+        // A mail forwarded "as attachment" carries the real confirmation as an embedded message —
+        // its body and sender are what matter, not the forwarding wrapper's.
+        var attached = message.BodyParts.OfType<MessagePart>().Select(p => p.Message).FirstOrDefault(m => m != null);
+        var bodyText = GetPlainText(message);
+        if (attached != null) bodyText += "\n" + GetPlainText(attached);
+        var combined = $"{subject}\n{bodyText}";
 
         var keywordMatches = AppointmentKeywordRegex.Matches(combined);
         if (keywordMatches.Count == 0) return null;
@@ -244,16 +245,304 @@ public class ImapAppointmentScanner
 
         var matchedNames = knownNames.Where(name => ContainsName(combined, name)).ToArray();
 
-        var title = subject.Replace("Fwd:", "", StringComparison.OrdinalIgnoreCase)
-                            .Replace("Wg:", "", StringComparison.OrdinalIgnoreCase)
-                            .Replace("Re:", "", StringComparison.OrdinalIgnoreCase).Trim();
-        if (string.IsNullOrWhiteSpace(title)) title = "Termin (Postfach)";
-
-        var senderDomain = message.From.Mailboxes.FirstOrDefault()?.Address.Split('@').ElementAtOrDefault(1) ?? "";
-        var category = DetectCategory(combined, senderDomain);
+        var (senderName, senderAddress) = ResolveOriginalSender(message, attached, rawSubject, bodyText);
+        var senderDomain = senderAddress?.Split('@').ElementAtOrDefault(1) ?? "";
+        var category = DetectCategory($"{combined}\n{senderDomain.Replace('-', ' ')}", senderDomain);
         var location = DetectLocation(combined);
 
+        // The subject is deliberately NOT used as the title — it's usually a sentence like
+        // "Wir freuen uns auf Ihren Termin". The title names who the appointment is with instead.
+        var title = DetectOrganizer(combined, knownNames)
+                    ?? CleanSenderName(senderName, senderAddress, knownNames)
+                    ?? OrganizerFromDomain(senderDomain)
+                    ?? FallbackTitle(category);
+
         return new ScannedAppointmentDto(title, startsAt, matchedNames, category, location);
+    }
+
+    // ---- Plain text ----------------------------------------------------------------------------
+
+    private static readonly Regex ForwardPrefixRegex = new(
+        @"^\s*(?:(?:fwd?|wg|aw|re|sv|odg|proslijeđeno)\s*:\s*)+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static string GetPlainText(MimeMessage message)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(message.TextBody)) parts.Add(NormalizeText(message.TextBody));
+        if (!string.IsNullOrWhiteSpace(message.HtmlBody)) parts.Add(HtmlToText(message.HtmlBody));
+        return string.Join("\n", parts);
+    }
+
+    // Drops <style>/<script>/<head> content entirely (otherwise CSS rules leak into the text and end
+    // up as "addresses"), turns block-level tags into line breaks so lines keep their meaning, then
+    // strips the remaining tags and decodes entities.
+    private static string HtmlToText(string html)
+    {
+        var s = Regex.Replace(html, @"<(script|style|head|title|noscript)\b[^>]*>.*?</\1\s*>", " ", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        s = Regex.Replace(s, @"<!--.*?-->", " ", RegexOptions.Singleline);
+        s = Regex.Replace(s, @"<(?:br|/p|/div|/tr|/li|/h[1-6]|/table|/ul|/ol|/blockquote)\b[^>]*>", "\n", RegexOptions.IgnoreCase);
+        s = Regex.Replace(s, @"<[^>]+>", " ");
+        s = System.Net.WebUtility.HtmlDecode(s);
+        return NormalizeText(s);
+    }
+
+    private static string NormalizeText(string text)
+    {
+        var lines = text.Replace("\r", "").Replace(' ', ' ').Replace('​', ' ').Split('\n')
+            .Select(l => Regex.Replace(l, @"[ \t]+", " ").Trim())
+            .Where(l => l.Length > 0);
+        return string.Join("\n", lines);
+    }
+
+    // ---- Sender --------------------------------------------------------------------------------
+
+    // "Von: Praxis Dr. Müller <info@praxis-mueller.de>" / "From: x@y.de" / "Von: Name [mailto:x@y.de]"
+    // lines that mail clients put above an inline-forwarded message.
+    private static readonly Regex InlineForwardHeaderRegex = new(
+        @"^[ \t>*]*(?:Von|From|Od|Absender)[ \t]*:[ \t]*(?<name>[^<\[\n@]*?)[ \t]*[<\[(]?(?:mailto:)?(?<addr>[^\s<>\[\]()@]+@[^\s<>\[\]()]+?)[>\])]?[ \t]*$",
+        RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.Compiled);
+
+    // For mail the user forwarded to themselves the outer sender is the user — the original sender
+    // (the practice, school, ...) sits in the attached message or the inline "Von:" header block.
+    private (string? Name, string? Address) ResolveOriginalSender(MimeMessage message, MimeMessage? attached, string rawSubject, string bodyText)
+    {
+        if (attached?.From.Mailboxes.FirstOrDefault() is { } inner)
+            return (inner.Name, inner.Address);
+
+        var outer = message.From.Mailboxes.FirstOrDefault();
+        var ownAddress = _options.Email?.Trim();
+        var isFromSelf = outer != null && !string.IsNullOrEmpty(ownAddress)
+                         && string.Equals(outer.Address, ownAddress, StringComparison.OrdinalIgnoreCase);
+
+        if (isFromSelf || ForwardPrefixRegex.IsMatch(rawSubject))
+        {
+            foreach (Match m in InlineForwardHeaderRegex.Matches(bodyText))
+            {
+                var addr = m.Groups["addr"].Value.Trim();
+                if (!string.IsNullOrEmpty(ownAddress) && string.Equals(addr, ownAddress, StringComparison.OrdinalIgnoreCase)) continue;
+                return (m.Groups["name"].Value.Trim(' ', '"', '\''), addr);
+            }
+        }
+
+        // Still the user's own address -> the sender says nothing about who the appointment is with.
+        return isFromSelf ? (null, null) : (outer?.Name, outer?.Address);
+    }
+
+    private static readonly Regex GenericSenderRegex = new(
+        @"^(?:no-?reply|do-?not-?reply|noreply|info|service|support|team|newsletter|notifications?|benachrichtigung(?:en)?|termine?|terminservice|kalender|calendar|mailer|system|admin|kontakt|contact|office|mail)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Booking platforms / mail infrastructure — their name is not who the appointment is with.
+    private static readonly string[] PlatformNames =
+    [
+        "doctolib", "jameda", "samedi", "clickdoc", "calendly", "google", "microsoft", "outlook", "teams", "zoom",
+        "eventbrite", "sendgrid", "mailchimp", "amazonses", "office365",
+    ];
+
+    private static string? CleanSenderName(string? name, string? address, List<string> knownNames)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var cleaned = Regex.Replace(name, @"\s+(?:via|über|ueber|by)\s+.*$", "", RegexOptions.IgnoreCase).Trim(' ', '"', '\'');
+        if (cleaned.Contains('@')) return null;
+        if (GenericSenderRegex.IsMatch(cleaned)) return null;
+        if (PlatformNames.Any(p => cleaned.Contains(p, StringComparison.OrdinalIgnoreCase))) return null;
+        return IsSensibleName(cleaned, knownNames) ? cleaned : null;
+    }
+
+    private static readonly HashSet<string> GenericMailDomains = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "gmail", "googlemail", "gmx", "web", "outlook", "hotmail", "live", "yahoo", "icloud", "me", "t-online",
+        "aol", "freenet", "posteo", "mail", "protonmail", "proton", "arcor", "mailbox",
+    };
+
+    // Booking/notification services ("termine-online.net") — not the organizer's own domain.
+    private static readonly HashSet<string> GenericDomainWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "termin", "termine", "online", "portal", "booking", "buchung", "service", "services", "app", "mail", "mailer",
+        "newsletter", "news", "noreply", "notify", "notification", "kalender", "calendar", "reminder", "system",
+    };
+
+    // "praxis-dr-mueller.de" -> "Praxis Dr Mueller", "kita-sonnenschein.de" -> "Kita Sonnenschein".
+    private static string? OrganizerFromDomain(string domain)
+    {
+        var labels = domain.ToLowerInvariant().Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (labels.Length < 2) return null;
+        var label = labels[^2];
+        if (label.Length < 3 || label.Any(char.IsDigit)) return null;
+        if (GenericMailDomains.Contains(label) || PlatformNames.Any(p => label.Contains(p))) return null;
+
+        var parts = label.Split('-', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Any(p => GenericDomainWords.Contains(p))) return null;
+        var words = parts.Select(w => char.ToUpperInvariant(w[0]) + w[1..]);
+        return string.Join(" ", words);
+    }
+
+    private static string FallbackTitle(string? category) => category switch
+    {
+        "health" => "Arzttermin",
+        "school" => "Schultermin",
+        "authority" => "Behördentermin",
+        "finance" => "Banktermin",
+        "travel" => "Reise",
+        "home" => "Handwerkertermin",
+        _ => "Termin",
+    };
+
+    // ---- Organizer (practice / doctor / institution) -------------------------------------------
+
+    // "Ihr Termin bei Dr. Müller", "appointment with Smile Dental", "pregled kod dr. Hodžić".
+    private static readonly Regex AppointmentWithRegex = new(
+        @"\b(?:termin|behandlung|untersuchung|sprechstunde|vorsorge\w*|impfung|appointment|visit|pregled)[ ]+(?:bei|in der|im|with|at|kod|u)[ ]+(?<org>[^\n]{2,100})",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // "Zahnarztpraxis Dr. med. dent. Anna Schmidt", "Dr. Müller", "Prof. Dr. Weber".
+    private static readonly Regex DoctorRegex = new(
+        @"(?<![\p{L}])(?<pre>(?:\p{Lu}[\p{L}\-]*praxis|Praxis|Ordination|Ordinacija)[ ]+)?(?<title>(?:Dr|Prof|Dipl\.-Med|Doc)\.(?:[ ]?(?:Dr|med|dent|vet|rer\.[ ]?nat|univ|habil|sci|phil)\.)*)[ ]+(?<name>[^\n]{2,80})",
+        RegexOptions.Compiled);
+
+    // "Grundschule Am Park", "Kinderarztpraxis Sonnenberg", "Bürgeramt Mitte", "Dom zdravlja Centar".
+    private static readonly Regex InstitutionRegex = new(
+        @"(?<![\p{L}\-])(?=\p{Lu})(?<head>[\p{L}\-]*?(?i:praxis|klinikum|kliniken|klinik|krankenhaus|zentrum|center|centre|mvz|schule|gymnasium|kita|kindergarten|kindertagesstätte|apotheke|amt|behörde|rathaus|jobcenter|sparkasse|bank|versicherung|therapie|institut|hotel|kanzlei|ordination|ordinacija|klinika|bolnica|ambulanta|poliklinika|škola|vrtić|clinic|hospital|practice|school|dental|dom zdravlja))(?![\p{L}])(?<tail>[^\n]{0,80})",
+        RegexOptions.Compiled);
+
+    private static string? DetectOrganizer(string text, List<string> knownNames)
+    {
+        foreach (Match m in AppointmentWithRegex.Matches(text))
+        {
+            var org = TakeNameTokens(m.Groups["org"].Value, knownNames, maxTokens: 6);
+            // Prefer the full doctor/institution form when the phrase points at one.
+            if (org != null && IsSensibleName(org, knownNames)) return ExpandDoctor(org, knownNames) ?? org;
+        }
+
+        foreach (Match m in DoctorRegex.Matches(text))
+        {
+            var name = TakeNameTokens(m.Groups["name"].Value, knownNames, maxTokens: 3, connectorsAllowed: false);
+            if (name == null) continue;
+            var full = $"{m.Groups["pre"].Value}{m.Groups["title"].Value} {name}".Trim();
+            if (IsSensibleName(full, knownNames)) return full;
+        }
+
+        foreach (Match m in InstitutionRegex.Matches(text))
+        {
+            var head = m.Groups["head"].Value;
+            var tail = TakeNameTokens(m.Groups["tail"].Value, knownNames, maxTokens: 4, mustStartWithSpace: true);
+            // A bare "Praxis"/"Schule" says nothing — needs a name after it or a compound like "Zahnarztpraxis".
+            if (tail == null && GenericInstitutionWords.Contains(head)) continue;
+            var full = tail == null ? head : $"{head} {tail}";
+            if (IsSensibleName(full, knownNames)) return full;
+        }
+
+        return null;
+    }
+
+    private static string? ExpandDoctor(string org, List<string> knownNames)
+    {
+        var m = DoctorRegex.Match(org);
+        if (!m.Success || m.Index != 0) return null;
+        var name = TakeNameTokens(m.Groups["name"].Value, knownNames, maxTokens: 3, connectorsAllowed: false);
+        return name == null ? null : $"{m.Groups["pre"].Value}{m.Groups["title"].Value} {name}".Trim();
+    }
+
+    private static readonly HashSet<string> GenericInstitutionWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Praxis", "Arztpraxis", "Klinik", "Klinikum", "Kliniken", "Krankenhaus", "Zentrum", "Center", "Centre", "Schule",
+        "Kita", "Kindergarten", "Apotheke", "Amt", "Behörde", "Bank", "Versicherung", "Therapie", "Institut", "Hotel",
+        "Kanzlei", "Clinic", "Hospital", "Practice", "School", "Dental", "Ordination", "Ordinacija", "Klinika",
+        "Bolnica", "Ambulanta", "Škola", "Vrtić", "Online-Praxis",
+    };
+
+    // Words that end a name: sentence words ("Wir freuen uns"), greetings, labels and the like.
+    private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "wir", "sie", "ihr", "ihre", "ihnen", "ihren", "ihrem", "ihrer", "uns", "bitte", "vielen", "dank", "danke", "liebe", "lieber",
+        "sehr", "geehrte", "geehrter", "hallo", "guten", "tag", "freundliche", "freundlichen", "grüße", "grüßen", "gruß",
+        "mit", "ist", "wurde", "wird", "hat", "haben", "findet", "statt", "bestätigt", "bestätigen", "freuen", "termin",
+        "termine", "terminbestätigung", "terminerinnerung", "datum", "uhrzeit", "uhr", "zeit", "ort", "adresse",
+        "anschrift", "telefon", "tel", "fax", "mobil", "e-mail", "email", "web", "www", "website", "hiermit", "heute",
+        "morgen", "als", "wegen", "from", "is", "has", "was", "your", "we", "dear", "hello", "hi", "thank", "thanks",
+        "please", "date", "time", "phone", "address", "confirmed", "reminder", "erinnerung", "patient", "patientin",
+        "herr", "frau", "mr", "mrs", "ms", "vaš", "poštovani", "hvala", "vrijeme", "adresa", "insgesamt", "gesamt",
+        "kalender", "calendar", "anhang", "voraus", "rahmen", "zusammenhang", "folgenden", "folgende",
+        "montag", "dienstag", "mittwoch", "donnerstag", "freitag", "samstag", "sonntag", "monday", "tuesday",
+        "wednesday", "thursday", "friday", "saturday", "sunday", "ponedjeljak", "utorak", "srijeda", "četvrtak",
+        "petak", "subota", "nedjelja", "online", "video", "abgesagt", "storniert", "verschoben", "gmbh",
+    };
+
+    // Lower-case words allowed inside a name ("Praxis für Allgemeinmedizin", "Grundschule am Park").
+    private static readonly HashSet<string> Connectors = new(StringComparer.Ordinal)
+    {
+        "für", "der", "des", "die", "am", "an", "im", "zur", "zum", "von", "und", "&", "i", "u", "za", "de", "of", "for", "the",
+    };
+
+    private static readonly HashSet<string> Abbreviations = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Dr.", "Prof.", "med.", "dent.", "vet.", "St.", "univ.", "Dipl.", "rer.", "nat.", "habil.", "Dipl.-Med.",
+    };
+
+    private static readonly Regex StreetSuffixRegex = new(
+        @"(?:straße|strasse|str\.|weg|allee|platz|gasse|ring|damm|ufer|chaussee|steig|pfad|hof|markt|kamp|graben|stieg|zeile|ulica)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Reads name-like tokens from the start of `raw` and stops at the first word that can't belong
+    // to a name (sentence words, dates, digits, punctuation, street names, the family's own names).
+    private static string? TakeNameTokens(string raw, List<string> knownNames, int maxTokens,
+        bool connectorsAllowed = true, bool mustStartWithSpace = false)
+    {
+        if (mustStartWithSpace && !raw.StartsWith(' ')) return null;
+
+        var knownTokens = knownNames
+            .SelectMany(n => n.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tokens = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var taken = new List<string>();
+
+        for (var i = 0; i < tokens.Length && taken.Count < maxTokens; i++)
+        {
+            var token = tokens[i];
+            var endsSentence = false;
+
+            if (Abbreviations.Contains(token)) { taken.Add(token); continue; }
+            if (Regex.IsMatch(token, @"[,;:!?|()\[\]""„“”»«/]$|\.$")) { endsSentence = true; token = token.TrimEnd(',', ';', ':', '!', '?', '|', ')', ']', '"', '“', '”', '»', '«', '/', '.'); }
+            token = token.TrimStart('(', '[', '"', '„', '“', '«', '»');
+            if (token.Length == 0) break;
+
+            if (token == "-" || token == "–" || token == "|") break;
+            if (char.IsDigit(token[0]) || token.Contains('@') || token.Contains("http", StringComparison.OrdinalIgnoreCase)) break;
+            if (StopWords.Contains(token) || MonthNames.ContainsKey(token) || knownTokens.Contains(token)) break;
+            if (StreetSuffixRegex.IsMatch(token)) break;
+
+            if (char.IsLower(token[0]))
+            {
+                if (!connectorsAllowed || !Connectors.Contains(token)) break;
+            }
+            else if (!char.IsLetter(token[0]) && token != "&") break;
+
+            taken.Add(token);
+            if (endsSentence) break;
+        }
+
+        // Never end on a connector ("Praxis für").
+        while (taken.Count > 0 && Connectors.Contains(taken[^1])) taken.RemoveAt(taken.Count - 1);
+        return taken.Count == 0 ? null : string.Join(" ", taken);
+    }
+
+    private static bool IsSensibleName(string name, List<string> knownNames)
+    {
+        name = name.Trim();
+        if (name.Length < 3 || name.Length > 70) return false;
+        if (!char.IsUpper(name[0])) return false;
+        if (Regex.IsMatch(name, @"[{}<>=;@\\#*_]|https?:|www\.", RegexOptions.IgnoreCase)) return false;
+        if (name.Count(char.IsLetter) < 3) return false;
+
+        var words = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.All(w => StopWords.Contains(w.Trim('.', ',')) || MonthNames.ContainsKey(w.Trim('.')))) return false;
+        if (words.Length == 1 && GenericInstitutionWords.Contains(words[0])) return false;
+        if (words.Length <= 2 && words.All(w => Abbreviations.Contains(w))) return false;
+        if (PlatformNames.Any(p => name.Contains(p, StringComparison.OrdinalIgnoreCase))) return false;
+
+        // The family member the appointment is for is not the organizer.
+        return !knownNames.Any(k => string.Equals(k, name, StringComparison.OrdinalIgnoreCase)
+                                    || string.Equals(k.Split(' ')[0], name, StringComparison.OrdinalIgnoreCase));
     }
 
     // Sender-domain rules take priority (e.g. any Doctolib confirmation is health regardless of
@@ -268,7 +557,7 @@ public class ImapAppointmentScanner
 
     private static readonly (string Category, Regex Keywords)[] CategoryKeywordGroups =
     [
-        ("health", new Regex(@"\b(arzt|zahnarzt|kinderarzt|hausarzt|impf|vorsorge|sprechstunde|apotheke|klinik|praxis|doctor|dentist|physician|ljekar|doktor)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        ("health", new Regex(@"\b(arzt|zahnarzt|kinderarzt|hausarzt|impf|vorsorge|sprechstunde|apotheke|klinik|praxis|doctor|dentist|physician|ljekar|doktor|pregled|zdravlj|bolnic|ordinacij|ambulant)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("school", new Regex(@"\b(schule|kindergarten|kita|elternabend|elterngespräch|lehrer|school|teacher|škol\w*)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("authority", new Regex(@"\b(finanzamt|behörde|bürgeramt|ausländerbehörde|amt für|rathaus)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("finance", new Regex(@"\b(bank|sparkasse|versicherung|rechnung|invoice|zahlung)\w*\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
@@ -291,24 +580,75 @@ public class ImapAppointmentScanner
         return null;
     }
 
-    // "Ort:"/"Adresse:"/"Praxis ..." lines give a physical place; failing that, video-call
-    // keywords mean the appointment has no physical location at all.
-    private static readonly Regex LocationLineRegex = new(
-        @"(?:Ort|Adresse|Location|Praxis)\s*[:\-]?\s*(?<value>[^\r\n]{3,120})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Only a real postal address counts as a location: "<Street> <No>, <PLZ> <City>" with street and
+    // PLZ on the same line or on two consecutive lines. Anything else ("Ort: siehe Anhang", leaked
+    // markup, ...) is ignored and the field stays empty. Failing an address, video-call keywords
+    // mean the appointment has no physical location at all.
+    private static readonly Regex PostalAddressRegex = new(
+        @"(?<street>\p{Lu}[\p{L}.\-]*(?:[ ][\p{L}.\-]+){0,4})[ ]+(?<no>\d{1,4}[ ]?[a-zA-Z]?(?:[ ]?[-–/][ ]?\d{1,4}[a-zA-Z]?)?|bb)[ ]*(?:,[ ]*|\n|[ ]+)(?:D-|DE-|BA-)?(?<plz>\d{5})[ ]+(?<city>\p{Lu}[\p{L}\-]+(?:[ ](?:am|an der|ob der|im|in|\(\p{L}+\)|\p{Lu}[\p{L}\-]+)){0,2})",
+        RegexOptions.Compiled);
+
+    private static readonly HashSet<string> StreetPrefixWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "am", "an", "der", "den", "dem", "im", "in", "auf", "zum", "zur", "alte", "alter", "neue", "neuer", "große",
+        "großer", "kleine", "kleiner", "st.", "sankt", "unter", "obere", "untere", "hinter", "vor", "bei", "ulica",
+    };
+
+    private static readonly HashSet<string> NonStreetWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "telefon", "tel", "tel.", "fax", "nr", "nr.", "nummer", "kundennummer", "rechnung", "uhr", "termin", "postfach",
+        "plz", "iban", "bic", "hrb", "ust", "steuernummer", "betrag", "eur", "euro", "mobil", "handy",
+    };
 
     private static readonly Regex OnlineKeywordRegex = new(
         @"\b(zoom|teams|videosprechstunde|videokonferenz|video call|online meeting|webinar)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static string? DetectLocation(string combined)
     {
-        var lineMatch = LocationLineRegex.Match(combined);
-        if (lineMatch.Success)
+        foreach (Match m in PostalAddressRegex.Matches(combined))
         {
-            var value = lineMatch.Groups["value"].Value.Trim();
-            if (value.Length > 0) return value;
+            var street = TrimStreet(m.Groups["street"].Value);
+            if (street == null) continue;
+
+            var city = m.Groups["city"].Value.Trim();
+            var cityWords = city.Split(' ');
+            if (cityWords.Any(w => StopWords.Contains(w) || NonStreetWords.Contains(w))) city = cityWords[0];
+            if (StopWords.Contains(city) || NonStreetWords.Contains(city)) continue;
+
+            var no = Regex.Replace(m.Groups["no"].Value, @"\s+", "");
+            return $"{street} {no}, {m.Groups["plz"].Value} {city}";
         }
 
         return OnlineKeywordRegex.IsMatch(combined) ? "Online" : null;
+    }
+
+    // The street group can swallow words in front of the street ("Praxis Dr. Müller Hauptstraße").
+    // Keep the street-name word plus only typical leading words ("Am", "Alte", ...); without a
+    // recognizable street suffix keep the last words that aren't titles or labels.
+    private static string? TrimStreet(string raw)
+    {
+        var words = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+        if (words.Any(w => NonStreetWords.Contains(w) || char.IsDigit(w[0]))) return null;
+
+        var suffixIndex = words.FindLastIndex(w => StreetSuffixRegex.IsMatch(w));
+        int start;
+        if (suffixIndex >= 0)
+        {
+            start = suffixIndex;
+            while (start > 0 && StreetPrefixWords.Contains(words[start - 1])) start--;
+        }
+        else
+        {
+            start = words.Count - 1;
+            while (start > 0 && words.Count - start < 4
+                   && !Abbreviations.Contains(words[start - 1]) && !StopWords.Contains(words[start - 1])
+                   && !GenericInstitutionWords.Contains(words[start - 1])) start--;
+        }
+
+        var street = string.Join(" ", words.Skip(start));
+        if (street.Length < 3 || !char.IsUpper(street[0])) return null;
+        if (StopWords.Contains(street) || Abbreviations.Contains(street) || MonthNames.ContainsKey(street.TrimEnd('.'))) return null;
+        return street;
     }
 
     private bool IsOwnReminderEmail(MimeMessage message)

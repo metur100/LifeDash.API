@@ -43,11 +43,11 @@ public class AppointmentSyncService
                 .Distinct()
                 .ToList();
 
-            // Dedup exactly per the requirement: same date+time and same set of people already
-            // recorded means skip, regardless of title/wording differences between emails.
+            // Same date+time already recorded (e.g. entered by hand) means skip, regardless of title/
+            // wording — unless both sides name people and they're clearly different people.
             var isDuplicate = existing.Any(a =>
                 a.StartsAt == s.StartsAt &&
-                SameAttendees(a.Attendees.Select(x => x.FamilyMemberId), attendeeIds));
+                OverlappingAttendees(a.Attendees.Select(x => x.FamilyMemberId), attendeeIds));
             if (isDuplicate) { skipped++; continue; }
 
             var appointment = new Appointment
@@ -71,6 +71,10 @@ public class AppointmentSyncService
         return new AppointmentSyncResult(scanned.Count, added, skipped);
     }
 
-    private static bool SameAttendees(IEnumerable<int> a, IEnumerable<int> b) =>
-        new HashSet<int>(a).SetEquals(new HashSet<int>(b));
+    private static bool OverlappingAttendees(IEnumerable<int> a, IEnumerable<int> b)
+    {
+        var setA = new HashSet<int>(a);
+        var setB = new HashSet<int>(b);
+        return setA.Count == 0 || setB.Count == 0 || setA.Overlaps(setB);
+    }
 }
