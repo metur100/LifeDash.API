@@ -24,6 +24,10 @@ public class MailTrackingOptions
     // Everyday scans (ScanMailboxAsync(fullHistory: false)) only look this far back.
     public int DefaultLookbackDays { get; set; } = 7;
 
+    // Location given to a mail-scanned appointment when the mail has no usable address (and isn't
+    // an online appointment). Empty = leave the location blank.
+    public string DefaultAppointmentLocation { get; set; } = "Düsseldorf";
+
     // Which account owns the mailbox-scanned packages/appointments when the scan is triggered by
     // the anonymous cron endpoint (POST /api/jobs/mail-scan) instead of a logged-in user. Find your
     // own id via GET /api/auth/me while signed in. 0 = not configured.

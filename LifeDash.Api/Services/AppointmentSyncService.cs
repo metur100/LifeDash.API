@@ -4,7 +4,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace LifeDash.Api.Services;
 
-public record AppointmentSyncResult(int Scanned, int Added, int SkippedDuplicate);
+public record AppointmentSyncResult(int Scanned, int Added, int SkippedDuplicate, int RemovedCancelled);
 
 // Shared by the authenticated manual trigger (POST /api/appointments/scan-mailbox) and the
 // anonymous cron endpoint (POST /api/jobs/mail-scan)
@@ -25,23 +25,53 @@ public class AppointmentSyncService
             .ToListAsync(ct);
 
         var scanned = await _scanner.ScanMailboxAsync(members.Select(m => m.FullName), ct);
-        if (scanned.Count == 0) return new AppointmentSyncResult(0, 0, 0);
+        if (scanned.Count == 0) return new AppointmentSyncResult(0, 0, 0, 0);
 
         var existing = await db.Appointments
             .Include(a => a.Attendees)
             .Where(a => a.UserId == userId)
             .ToListAsync(ct);
 
+        List<int> AttendeeIdsOf(ScannedAppointmentDto s) => members
+            .Where(m => s.MatchedNames.Contains(m.FullName, StringComparer.OrdinalIgnoreCase))
+            .Select(m => m.Id)
+            .Distinct()
+            .ToList();
+
+        // Cancellations first: remove the appointment they cancel. They also block the original
+        // confirmation (still in the mailbox) from re-adding it below — the cancellation is always
+        // newer than the confirmation, so it stays in the lookback window at least as long.
+        var cancellations = scanned.Where(s => s.IsCancelled).Select(s => (Scan: s, Ids: AttendeeIdsOf(s))).ToList();
+        var removed = 0;
+        foreach (var (c, cIds) in cancellations)
+        {
+            var matches = existing.Where(a =>
+                a.Recurrence == null &&
+                SameSlot(a.StartsAt, c) &&
+                OverlappingAttendees(a.Attendees.Select(x => x.FamilyMemberId), cIds)).ToList();
+            // Date-only cancellation with several appointments that day: too ambiguous to delete.
+            if (!c.TimeKnown && matches.Count > 1) continue;
+
+            foreach (var a in matches)
+            {
+                db.Appointments.Remove(a);
+                existing.Remove(a);
+                removed++;
+            }
+        }
+
         var added = 0;
         var skipped = 0;
 
-        foreach (var s in scanned)
+        foreach (var s in scanned.Where(s => !s.IsCancelled))
         {
-            var attendeeIds = members
-                .Where(m => s.MatchedNames.Contains(m.FullName, StringComparer.OrdinalIgnoreCase))
-                .Select(m => m.Id)
-                .Distinct()
-                .ToList();
+            var attendeeIds = AttendeeIdsOf(s);
+
+            if (cancellations.Any(c => SameSlot(s.StartsAt, c.Scan) && OverlappingAttendees(c.Ids, attendeeIds)))
+            {
+                skipped++;
+                continue;
+            }
 
             // Same date+time already recorded (e.g. entered by hand) means skip, regardless of title/
             // wording — unless both sides name people and they're clearly different people.
@@ -68,8 +98,11 @@ public class AppointmentSyncService
         }
 
         await db.SaveChangesAsync(ct);
-        return new AppointmentSyncResult(scanned.Count, added, skipped);
+        return new AppointmentSyncResult(scanned.Count, added, skipped, removed);
     }
+
+    private static bool SameSlot(DateTime startsAt, ScannedAppointmentDto cancellation) =>
+        cancellation.TimeKnown ? startsAt == cancellation.StartsAt : startsAt.Date == cancellation.StartsAt.Date;
 
     private static bool OverlappingAttendees(IEnumerable<int> a, IEnumerable<int> b)
     {

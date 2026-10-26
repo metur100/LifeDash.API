@@ -240,7 +240,7 @@ app.MapPost("/api/jobs/mail-scan", async (HttpRequest request, IConfiguration co
         {
             status = "completed",
             packages = new { packages.Scanned, packages.Added, packages.Updated },
-            appointments = new { appointments.Scanned, appointments.Added, appointments.SkippedDuplicate },
+            appointments = new { appointments.Scanned, appointments.Added, appointments.SkippedDuplicate, appointments.RemovedCancelled },
         });
     }
     catch (Exception ex)

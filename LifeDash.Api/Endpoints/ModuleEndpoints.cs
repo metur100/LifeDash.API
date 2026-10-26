@@ -112,7 +112,7 @@ public static class ModuleEndpoints
             try
             {
                 var result = await sync.SyncAsync(u.UserId(), db, ct);
-                return Results.Ok(new { success = true, scanned = result.Scanned, added = result.Added, skippedDuplicate = result.SkippedDuplicate });
+                return Results.Ok(new { success = true, scanned = result.Scanned, added = result.Added, skippedDuplicate = result.SkippedDuplicate, removedCancelled = result.RemovedCancelled });
             }
             catch (Exception ex)
             {

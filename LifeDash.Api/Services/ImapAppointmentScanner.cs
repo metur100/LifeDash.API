@@ -13,7 +13,11 @@ public record ScannedAppointmentDto(
     DateTime StartsAt,
     string[] MatchedNames,
     string? Category,
-    string? Location
+    string? Location,
+    // A cancellation mail ("Ihr Termin wurde abgesagt") — the sync removes the matching appointment
+    // instead of adding one. Cancellations may only name the date, then TimeKnown is false.
+    bool IsCancelled = false,
+    bool TimeKnown = true
 );
 
 // Scans the same mailbox as ImapPackageScanner for Termin confirmations instead of shipments.
@@ -206,8 +210,9 @@ public class ImapAppointmentScanner
         if (attached != null) bodyText += "\n" + GetPlainText(attached);
         var combined = $"{subject}\n{bodyText}";
 
+        var isCancelled = IsCancellation(subject, combined);
         var keywordMatches = AppointmentKeywordRegex.Matches(combined);
-        if (keywordMatches.Count == 0) return null;
+        if (keywordMatches.Count == 0 && !isCancelled) return null;
 
         // A message can contain several dates (e.g. an invoice's "Transaction Date" alongside an
         // "Appointment" line). Prefer the date+time found near an appointment keyword over the
@@ -230,6 +235,7 @@ public class ImapAppointmentScanner
             break;
         }
 
+        var timeKnown = true;
         if (best is null)
         {
             // Fall back to searching the whole message, e.g. when the keyword is only in the
@@ -237,8 +243,10 @@ public class ImapAppointmentScanner
             var dateOnly = ExtractDate(combined);
             if (dateOnly is null) return null;
             var time = ExtractTime(combined);
-            if (time is null) return null;
-            best = (dateOnly.Value, time.Value);
+            // A cancellation often only names the day ("Ihr Termin am 30.10.2026 entfällt").
+            if (time is null && !isCancelled) return null;
+            timeKnown = time is not null;
+            best = (dateOnly.Value, time ?? (0, 0));
         }
 
         var startsAt = best.Value.date.ToDateTime(new TimeOnly(best.Value.time.hour, best.Value.time.minute));
@@ -248,7 +256,8 @@ public class ImapAppointmentScanner
         var (senderName, senderAddress) = ResolveOriginalSender(message, attached, rawSubject, bodyText);
         var senderDomain = senderAddress?.Split('@').ElementAtOrDefault(1) ?? "";
         var category = DetectCategory($"{combined}\n{senderDomain.Replace('-', ' ')}", senderDomain);
-        var location = DetectLocation(combined);
+        var defaultLocation = string.IsNullOrWhiteSpace(_options.DefaultAppointmentLocation) ? null : _options.DefaultAppointmentLocation.Trim();
+        var location = DetectLocation(combined) ?? defaultLocation;
 
         // The subject is deliberately NOT used as the title — it's usually a sentence like
         // "Wir freuen uns auf Ihren Termin". The title names who the appointment is with instead.
@@ -257,8 +266,24 @@ public class ImapAppointmentScanner
                     ?? OrganizerFromDomain(senderDomain)
                     ?? FallbackTitle(category);
 
-        return new ScannedAppointmentDto(title, startsAt, matchedNames, category, location);
+        return new ScannedAppointmentDto(title, startsAt, matchedNames, category, location, isCancelled, timeKnown);
     }
+
+    // ---- Cancellation --------------------------------------------------------------------------
+
+    // In the subject a single word is enough ("Absage: Ihr Termin am ...", "Cancelled: ...").
+    private static readonly Regex CancellationSubjectRegex = new(
+        @"\b(abgesagt|absage|terminabsage|storniert|stornierung|stornierungsbestätigung|annulliert|entfällt|fällt aus|cancel(?:l)?ed|cancellation|otkazan[oia]?|otkazivanje)\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // In the body only full phrases count — confirmations routinely say "falls Sie Ihren Termin
+    // absagen möchten" / "need to cancel?" and must not be mistaken for a cancellation.
+    private static readonly Regex CancellationBodyRegex = new(
+        @"\b(?:(?:wurde|wurden|ist|sind|has been|have been|was|were|is|je|su|bio je)\s+(?:leider\s+|bereits\s+|erfolgreich\s+|successfully\s+)?(?:abgesagt|storniert|annulliert|cancel(?:l)?ed|otkazan[oia]?)|terminabsage|stornierungsbestätigung|cancellation confirm(?:ation|ed)|(?:termin|appointment)\w*\s+(?:entfällt|fällt aus))\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool IsCancellation(string subject, string combined) =>
+        CancellationSubjectRegex.IsMatch(subject) || CancellationBodyRegex.IsMatch(combined);
 
     // ---- Plain text ----------------------------------------------------------------------------
 
@@ -603,23 +628,62 @@ public class ImapAppointmentScanner
     private static readonly Regex OnlineKeywordRegex = new(
         @"\b(zoom|teams|videosprechstunde|videokonferenz|video call|online meeting|webinar)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // "Ort:", "Adresse:", "Location:" right before an address marks it as where the appointment is.
+    private static readonly Regex LocationLabelRegex = new(
+        @"\b(ort|adresse|anschrift|standort|treffpunkt|wo|praxisadresse|location|address|venue|where|adresa|mjesto|lokacija)\b\s*:?",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Legal footer / imprint wording. A booking platform or newsletter footer carries the company's
+    // registered address ("… GmbH, Friedrichstraße 111, 10117 Berlin, Amtsgericht …"), which has
+    // nothing to do with where the appointment takes place.
+    private static readonly Regex ImprintMarkerRegex = new(
+        @"\b(impressum|imprint|handelsregister|registergericht|amtsgericht|hrb|hra|geschäftsführ\w*|vorstand|aufsichtsrat|sitz der gesellschaft|ust-?id\w*|umsatzsteuer\w*|steuernummer|vat|managing directors?|registered office|company registration)\b|©|\(c\)\s*20\d\d",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex CompanyFormRegex = new(
+        @"\b(gmbh|ag|ug|kg|ohg|ltd|inc|llc|d\.o\.o)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Returns null when no real address is found (the caller falls back to the default location).
     private static string? DetectLocation(string combined)
     {
+        string? firstPlain = null;
         foreach (Match m in PostalAddressRegex.Matches(combined))
         {
-            var street = TrimStreet(m.Groups["street"].Value);
-            if (street == null) continue;
+            var address = FormatAddress(m);
+            if (address == null) continue;
 
-            var city = m.Groups["city"].Value.Trim();
-            var cityWords = city.Split(' ');
-            if (cityWords.Any(w => StopWords.Contains(w) || NonStreetWords.Contains(w))) city = cityWords[0];
-            if (StopWords.Contains(city) || NonStreetWords.Contains(city)) continue;
+            var before = combined[Math.Max(0, m.Index - 120)..m.Index];
+            var labelled = LocationLabelRegex.IsMatch(before);
 
-            var no = Regex.Replace(m.Groups["no"].Value, @"\s+", "");
-            return $"{street} {no}, {m.Groups["plz"].Value} {city}";
+            var context = combined[Math.Max(0, m.Index - 300)..Math.Min(combined.Length, m.Index + m.Length + 300)];
+            if (ImprintMarkerRegex.IsMatch(context)) continue;
+            // "Firma GmbH" on the address' own or previous line is a company footer — unless the
+            // address is explicitly labelled as the appointment's place.
+            var lineStart = combined.LastIndexOf('\n', Math.Max(0, m.Index - 1));
+            var prevLineStart = lineStart > 0 ? combined.LastIndexOf('\n', lineStart - 1) : -1;
+            var nearLines = combined[(prevLineStart + 1)..(m.Index + m.Length)];
+            if (!labelled && CompanyFormRegex.IsMatch(nearLines)) continue;
+
+            if (labelled) return address;
+            firstPlain ??= address;
         }
 
+        if (firstPlain != null) return firstPlain;
         return OnlineKeywordRegex.IsMatch(combined) ? "Online" : null;
+    }
+
+    private static string? FormatAddress(Match m)
+    {
+        var street = TrimStreet(m.Groups["street"].Value);
+        if (street == null) return null;
+
+        var city = m.Groups["city"].Value.Trim();
+        var cityWords = city.Split(' ');
+        if (cityWords.Any(w => StopWords.Contains(w) || NonStreetWords.Contains(w))) city = cityWords[0];
+        if (StopWords.Contains(city) || NonStreetWords.Contains(city)) return null;
+
+        var no = Regex.Replace(m.Groups["no"].Value, @"\s+", "");
+        return $"{street} {no}, {m.Groups["plz"].Value} {city}";
     }
 
     // The street group can swallow words in front of the street ("Praxis Dr. Müller Hauptstraße").
